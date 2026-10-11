@@ -12,7 +12,7 @@ import type { OpenAIMessage } from './mapper.js';
 
 export type ProviderId = 'nvidia' | 'openrouter' | 'openai' | 'groq' | 'anthropic' | 'google' | 'zen' | 'opencode-go' |
   'ollama' | 'vllm' | 'lmstudio' | 'together' | 'huggingface' | 'sambanova' | 'siliconflow' | 'novita' | 'dashscope' |
-  'deepseek' | 'mistral' | 'xai' | 'cerebras' | 'fireworks' | (string & {});
+  'deepseek' | 'mistral' | 'xai' | 'cerebras' | 'fireworks' | 'workers-ai' | (string & {});
 
 export interface ProviderConfig {
   id: ProviderId;

@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import dotenv from 'dotenv';
 import { USER_ENV_PATH, migrateUserData, dataFile } from './data-paths.js';
+import { workersAIBaseUrl } from './provider-endpoints.js';
+
+/** Validation errors are safe to show; filesystem failures remain generic in the dashboard. */
+export class SettingsValidationError extends Error {}
 
 export function initializeConfig(): string {
   migrateUserData();
@@ -32,6 +36,14 @@ export function writeSettings(updates: Record<string, unknown>): void {
     if ((key === 'AG_GATEWAY_TOKEN' || key === 'DASHBOARD_PASSWORD') && value.length < 16) throw new Error(`${key} must contain at least 16 characters`);
     if (key === 'DASHBOARD_USER' && !value.trim()) throw new Error('Dashboard username cannot be empty');
     current[key] = value;
+  }
+  // Check the complete effective configuration before touching the file. A key
+  // update can activate a provider already selected in an existing profile.
+  const effective = { ...process.env, ...current };
+  const workersSelected = (effective.PROVIDER_PRIORITY || '').split(',').some(id => id.trim().toLowerCase() === 'workers-ai');
+  if (workersSelected || updates.WORKERS_AI_BASE_URL) {
+    try { workersAIBaseUrl(effective.WORKERS_AI_BASE_URL || 'https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1'); }
+    catch { throw new SettingsValidationError('Set WORKERS_AI_BASE_URL to https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1 with your actual 32-character account ID.'); }
   }
   fs.writeFileSync(USER_ENV_PATH, Object.entries(current).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join('\n') + '\n', { mode: 0o600 });
 }

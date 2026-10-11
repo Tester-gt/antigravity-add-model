@@ -126,6 +126,29 @@ test('provider metadata and settings support every catalog entry without exposin
   assert.ok(!JSON.stringify(metadata).includes('fixture-private-'));
 });
 
+test('invalid Workers AI dashboard updates leave settings and routing intact', async () => {
+  const { initializeConfig } = await import('../src/settings.js');
+  const filename = initializeConfig();
+  const before = fs.readFileSync(filename, 'utf8');
+  const modelsFilename = path.join(process.env.AG_GATEWAY_DATA_DIR!, 'models.json');
+  const modelsBefore = fs.readFileSync(modelsFilename, 'utf8');
+  try {
+    for (const badUrl of ['', 'https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1']) {
+      const response = await api('/api/config', { PROVIDER_PRIORITY: 'workers-ai', WORKERS_AI_API_KEY: 'private-new-key', WORKERS_AI_BASE_URL: badUrl });
+      assert.equal(response.status, 400);
+      const error = await response.text();
+      assert.match(error, /WORKERS_AI_BASE_URL|account/);
+      assert.ok(!error.includes('private-new-key'));
+      assert.equal(fs.readFileSync(filename, 'utf8'), before);
+      assert.equal(fs.readFileSync(modelsFilename, 'utf8'), modelsBefore);
+      assert.equal((await generate()).status, 200);
+    }
+  } finally {
+    await api('/api/config', { PROVIDER_PRIORITY: 'openai,nvidia', WORKERS_AI_API_KEY: '', WORKERS_AI_BASE_URL: '' });
+    await api('/api/models', setup);
+  }
+});
+
 test('new provider selections actually route authenticated Gemini JSON and SSE requests after reload', async () => {
   try {
     for (const id of ['together', 'huggingface', 'sambanova', 'siliconflow', 'novita', 'dashscope', 'deepseek', 'mistral', 'xai', 'cerebras', 'fireworks']) {

@@ -38,6 +38,7 @@ uses the base URL and the environment variable shown below.
 | Provider / ID | Default base URL | Gateway API key | Official documentation |
 | --- | --- | --- | --- |
 | OpenRouter / `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | [Models API](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties) |
+| Cloudflare Workers AI / `workers-ai` | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | `WORKERS_AI_API_KEY` | [OpenAI compatibility](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/), [models](https://developers.cloudflare.com/api/resources/ai/subresources/models/methods/list/) |
 | Together AI / `together` | `https://api.together.ai/v1` | `TOGETHER_API_KEY` | [Chat](https://docs.together.ai/reference/chat-completions), [models](https://docs.together.ai/reference/models) |
 | Hugging Face / `huggingface` | `https://router.huggingface.co/v1` | `HUGGINGFACE_API_KEY` or `HF_TOKEN` | [Inference Providers](https://huggingface.co/docs/inference-providers/index) |
 | SambaNova / `sambanova` | `https://api.sambanova.ai/v1` | `SAMBANOVA_API_KEY` | [Chat](https://docs.sambanova.ai/docs/api-reference/chat-completions/create-chat-based-completion) |
@@ -59,6 +60,51 @@ for older DeepSeek and Fireworks entries.
 ![Provider credentials and endpoint settings in the gateway](../assets/provider_connections.jpg)
 
 *Gateway provider settings in an isolated local test profile; no live credentials are shown.*
+
+## Cloudflare Workers AI
+
+1. Select **Cloudflare Workers AI** in the desktop model editor.
+2. Replace `ACCOUNT_ID` in the API URL with your Cloudflare account's 32-character
+   ID. The full chat URL is
+   `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1/chat/completions`.
+3. Enter a token created with Cloudflare's **Workers AI API token** template;
+   see the [REST API setup guide](https://developers.cloudflare.com/workers-ai/get-started/rest-api/).
+4. Click **Fetch provider models**, or enter the exact `@cf/...` or `@hf/...`
+   provider model ID manually. Choose a model with function/tool calling support
+   for Agent or Plan workflows.
+
+Discovery uses Cloudflare's account-scoped `/ai/models/search` endpoint with
+`format=openrouter` and a text-generation filter. It follows catalog pages and
+also accepts Cloudflare's native model-list response. Existing **Custom** entries
+using the official Cloudflare account URL receive the same discovery behavior.
+The standard `/ai/v1/models` route can return HTTP 405 even when chat works;
+that route is not used for Cloudflare discovery. Authentication and other HTTP
+errors remain failures, with setup guidance shown in the model editor.
+
+For the optional gateway, enter the token and account-specific base URL under
+**Providers**, or configure the gateway's `.env` file:
+
+```dotenv
+WORKERS_AI_API_KEY=your_workers_ai_token
+WORKERS_AI_BASE_URL=https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1
+```
+
+Then select `workers-ai` in a gateway model route and enter its exact provider
+model ID. When upgrading, rebuild and restart the gateway. For the desktop,
+rebuild and rerun the installer with Antigravity closed, as described in
+[installation](../README.md#installation).
+
+The proxy normalizes integer tool-schema bounds such as `minLength: "1"` to
+`minLength: 1` before forwarding requests. This applies to OpenAI-compatible,
+Anthropic, and gateway tool declarations, including `parametersJsonSchema`.
+Other schema constraints and literal defaults/examples are preserved. Recognized
+desktop HTTP 400/422 schema failures include a short diagnostic hint without exposing
+the provider's raw error body, credentials, or echoed prompt content.
+
+Catalog access does not test generation or guarantee that a particular model
+supports tools. Automated coverage uses local HTTP fixtures, including streaming
+function calls; an authenticated live Cloudflare session is not part of those
+tests.
 
 ## Discovery and compatibility notes
 

@@ -9,6 +9,8 @@ export interface ProviderPreset {
 }
 export declare const PROVIDERS: readonly ProviderPreset[];
 export declare function getProvider(id: string): ProviderPreset | undefined;
+/** Explicit presets can use a proxy origin; only the official HTTPS origin is auto-detected. */
+export declare function workersAiAccountPath(apiUrl: string, provider?: string): string | undefined;
 /** Defaults for old files without apiFormat must not silently change protocol. */
 export declare function resolveApiFormat(provider: string, override?: ApiFormat): ApiFormat;
 //# sourceMappingURL=providers.d.ts.map

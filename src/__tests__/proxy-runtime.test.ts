@@ -156,6 +156,119 @@ async function readToolCalls(response: Response, stream: boolean) {
 }
 
 describe('real upstream HTTP routing', () => {
+  it.each([400, 422])(
+    'explains an upstream HTTP %i tool-schema rejection without exposing its body',
+    async (status) => {
+      let attempts = 0;
+      const upstream = await serve((_req, res) => {
+        attempts++;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: {
+              message:
+                "Tool 18 function has invalid 'parameters' schema: '1' is not of type 'integer'. On schema['properties']['ServerName']['minLength']: '1'. Echo: secret-test-token private-user-file-content",
+              echoedKey: 'secret-test-token',
+              privateContent: 'private-user-file-content',
+            },
+          }),
+        );
+      });
+      const response = await fetch(await proxy([model(upstream, { maxRetries: 2 })]));
+      const text = await response.text();
+      expect(response.status).toBe(status);
+      expect(attempts).toBe(1);
+      expect(text).toContain('Tool schema rejected');
+      expect(text).toContain('minLength');
+      expect(text).not.toContain('secret-test-token');
+      expect(text).not.toContain('private-user-file-content');
+      expect(text).not.toContain('ServerName');
+    },
+  );
+
+  it.each([1, 1000])(
+    'bounds incomplete upstream error bodies (%i chunks) and preserves the original status',
+    async (chunks) => {
+      const upstream = await serve((_req, res) => {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.write('private-user-file-content '.repeat(chunks));
+        // Deliberately never end: error diagnostics must not wait for an unlimited body.
+      });
+      const response = await fetch(await proxy([model(upstream, { idleTimeout: 10000 })]), {
+        signal: AbortSignal.timeout(3000),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe('{"error":{"message":"Upstream returned HTTP 400."}}');
+    },
+  );
+
+  it.each([false, true])(
+    'normalizes Workers AI tool schemas over HTTP and returns a function call (stream=%s)',
+    async (stream) => {
+      const accountPath = `/client/v4/accounts/${'a'.repeat(32)}/ai/v1/chat/completions`;
+      let forwardedUrl: string | undefined;
+      let forwardedAuthorization: string | undefined;
+      let forwarded:
+        | {
+            model: string;
+            tools: {
+              function: { parameters: { properties: { ServerName: { type: string; minLength: string | number } } } };
+            }[];
+          }
+        | undefined;
+      const upstream = await serve(async (req, res) => {
+        forwardedUrl = req.url;
+        forwardedAuthorization = req.headers.authorization;
+        forwarded = await body(req);
+        if (forwarded!.tools[0].function.parameters.properties.ServerName.minLength !== 1) {
+          res.writeHead(400);
+          res.end('Tool function has invalid parameters schema: minLength must be an integer');
+          return;
+        }
+        toolReply(res, 'openai', stream, 'list_resources', { ServerName: 'workspace' });
+      });
+      const configured = model(`${upstream}${accountPath}`, {
+        provider: 'workers-ai',
+        externalModelName: '@cf/test/tool-model',
+      });
+      const url = await serve((_req, res) => {
+        void runCustomModelRequest(
+          res,
+          configured,
+          {
+            contents: [{ role: 'user', parts: [{ text: 'List workspace resources' }] }],
+            tools: [
+              {
+                functionDeclarations: [
+                  {
+                    name: 'list_resources',
+                    parametersJsonSchema: {
+                      type: 'OBJECT',
+                      properties: { ServerName: { type: 'STRING', minLength: '1' } },
+                      required: ['ServerName'],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          stream,
+          [configured],
+          false,
+        );
+      });
+      const response = await fetch(url);
+      expect(response.status).toBe(200);
+      expect(await readToolCalls(response, stream)).toEqual([
+        expect.objectContaining({ name: 'list_resources', args: { ServerName: 'workspace' } }),
+      ]);
+      expect(forwarded?.model).toBe('@cf/test/tool-model');
+      expect(forwardedUrl).toBe(accountPath);
+      expect(forwardedAuthorization).toBe('Bearer secret-test-token');
+      expect(forwarded?.tools[0].function.parameters.properties.ServerName).toEqual({ type: 'string', minLength: 1 });
+    },
+  );
+
   it.each([
     { provider: 'openai' as const, stream: false },
     { provider: 'anthropic' as const, stream: true },
@@ -758,7 +871,10 @@ describe('provider and configuration contracts', () => {
     for (const preset of PROVIDERS)
       expect(
         validateCustomModel(
-          model(preset.defaultUrl || 'http://localhost:8000', { provider: preset.id, apiFormat: preset.apiFormat }),
+          model((preset.defaultUrl || 'http://localhost:8000').replace('ACCOUNT_ID', 'a'.repeat(32)), {
+            provider: preset.id,
+            apiFormat: preset.apiFormat,
+          }),
         ).valid,
       ).toBe(true);
     expect(getProviderHeaders('anthropic', '')['anthropic-version']).toBe('2023-06-01');

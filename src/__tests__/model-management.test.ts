@@ -330,6 +330,216 @@ describe('model storage and compatibility', () => {
 });
 
 describe('provider discovery and saved credentials', () => {
+  const workersAccount = '0123456789abcdef0123456789abcdef';
+  const workersPath = `/client/v4/accounts/${workersAccount}/ai`;
+
+  it('uses the Workers AI catalog for the preset and existing official Custom endpoints only', () => {
+    const expected = `https://api.cloudflare.com${workersPath}/models/search?format=openrouter&task=Text+Generation&per_page=100&page=1`;
+    expect(modelListUrl(`https://api.cloudflare.com${workersPath}/v1/chat/completions`, 'openai', 'workers-ai')).toBe(
+      expected,
+    );
+    expect(modelListUrl(`https://api.cloudflare.com${workersPath}/v1`, 'openai', 'custom')).toBe(expected);
+    expect(modelListUrl(`https://api.cloudflare.com.example${workersPath}/v1`, 'openai', 'custom')).toContain(
+      '/ai/v1/models',
+    );
+    expect(modelListUrl(`http://api.cloudflare.com${workersPath}/v1`, 'openai', 'custom')).toContain('/ai/v1/models');
+  });
+
+  it('rejects an unfinished account URL before saving, importing, or discovering', async () => {
+    const { manager } = setup();
+    const template = manager.presets().find((preset) => preset.id === 'workers-ai')!;
+    expect(template).toMatchObject({ label: 'Cloudflare Workers AI', apiFormat: 'openai', keyRequired: true });
+    const input = { ...entry, provider: template.id, apiUrl: template.defaultUrl };
+    expect(() => manager.saveModel(input)).toThrow('Account ID');
+    expect(() => manager.store.import({ models: [input] })).toThrow('Account ID');
+    await expect(manager.discoverModels(input)).rejects.toThrow('Account ID');
+    await expect(
+      manager.discoverModels({ ...input, apiUrl: `https://api.cloudflare.com${workersPath}/v1`, apiKey: '' }),
+    ).rejects.toThrow('API token');
+  });
+
+  it('authenticates Workers AI catalog pages and uses model names instead of native UUIDs', async () => {
+    const requests: string[] = [];
+    const url = await server((req, res) => {
+      expect(req.headers.authorization).toBe('Bearer private-workers-token');
+      const request = new URL(req.url!, 'http://localhost');
+      expect(request.pathname).toBe(`${workersPath}/models/search`);
+      expect(request.searchParams.get('format')).toBe('openrouter');
+      expect(request.searchParams.get('task')).toBe('Text Generation');
+      requests.push(req.url!);
+      const page = Number(request.searchParams.get('page'));
+      res.end(
+        JSON.stringify({
+          success: true,
+          result:
+            page === 1
+              ? [
+                  { id: 'model-uuid-1', name: '@cf/text-one', task: { name: 'Text Generation' } },
+                  { id: 'image-uuid', name: '@cf/image-model', task: { name: 'Text-to-Image' } },
+                ]
+              : [{ id: 'model-uuid-2', name: '@cf/text-two', task: { name: 'Text Generation' } }],
+          result_info: { page, per_page: 2, total_count: 3, total_pages: 2 },
+        }),
+      );
+    });
+    const { manager } = setup();
+    const input = {
+      provider: 'workers-ai',
+      apiUrl: `${url}${workersPath}/v1/chat/completions`,
+      apiKey: 'private-workers-token',
+    };
+    expect((await manager.discoverModels(input)).models.map((model) => model.id)).toEqual([
+      '@cf/text-one',
+      '@cf/text-two',
+    ]);
+    expect(requests).toHaveLength(2);
+    const result = await manager.testModel({ ...input, externalModelName: '@cf/text-two' });
+    expect(result).toMatchObject({
+      success: true,
+      message: 'Model listing verified (2 models). Generation was not tested.',
+    });
+    expect(JSON.stringify(result)).not.toContain('private-workers-token');
+  });
+
+  it('preserves Workers AI marketplace metadata and follows pages without result_info', async () => {
+    const pages: number[] = [];
+    const url = await server((req, res) => {
+      const page = Number(new URL(req.url!, 'http://localhost').searchParams.get('page'));
+      pages.push(page);
+      res.end(
+        JSON.stringify({
+          data:
+            page === 1
+              ? Array.from({ length: 100 }, (_, i) => ({
+                  id: `@cf/text-${i}`,
+                  name: `Text ${i}`,
+                  context_length: 32768,
+                  top_provider: { max_completion_tokens: 4096 },
+                  architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] },
+                }))
+              : [
+                  { id: '@cf/last', architecture: { output_modalities: ['text'] } },
+                  { id: '@cf/image', architecture: { output_modalities: ['image'] } },
+                ],
+        }),
+      );
+    });
+    const { manager } = setup();
+    const found = await manager.discoverModels({
+      provider: 'workers-ai',
+      apiUrl: `${url}${workersPath}/v1`,
+      apiKey: 'secret',
+    });
+    expect(pages).toEqual([1, 2]);
+    expect(found.models).toHaveLength(101);
+    expect(found.models[0]).toMatchObject({
+      id: '@cf/text-0',
+      displayName: 'Text 0',
+      contextWindow: 32768,
+      maxOutputTokens: 4096,
+      supportsVision: true,
+    });
+  });
+
+  it.each([
+    { authorization: 'Bearer private-header-token' },
+    { 'X-Auth-Key': 'private-global-key', 'x-AUTH-email': 'test@example.test' },
+  ])('uses saved Workers AI authentication headers with no API-key field: %j', async (customHeaders) => {
+    let requests = 0;
+    const url = await server((req, res) => {
+      requests++;
+      expect(new URL(req.url!, 'http://localhost').pathname).toBe(`${workersPath}/models/search`);
+      const expected = Object.fromEntries(
+        Object.entries(customHeaders).map(([key, value]) => [key.toLowerCase(), value]),
+      );
+      const authenticated = Object.entries(expected).every(([key, value]) => req.headers[key] === value);
+      if (!expected.authorization) expect(req.headers.authorization).toBeUndefined();
+      res.writeHead(authenticated ? 200 : 401);
+      res.end(JSON.stringify({ data: [{ id: '@cf/text-one' }] }));
+    });
+    const { manager } = setup();
+    manager.saveModel({
+      ...entry,
+      provider: 'workers-ai',
+      externalModelName: '@cf/text-one',
+      apiUrl: `${url}${workersPath}/v1`,
+      apiKey: 'none',
+      customHeaders,
+    });
+    const masked = manager.store.list()[0];
+    expect(Object.values(masked.customHeaders!)).toEqual(Object.keys(customHeaders).map(() => '********'));
+    expect((await manager.discoverModels(masked)).models.map((model) => model.id)).toEqual(['@cf/text-one']);
+    const result = await manager.testModel(masked);
+    expect(result).toMatchObject({
+      success: true,
+      message: 'Model listing verified (1 models). Generation was not tested.',
+    });
+    expect(JSON.stringify(result)).not.toContain('private-');
+    expect(requests).toBe(2);
+    const invalidHeaders = Object.fromEntries(Object.keys(customHeaders).map((key) => [key, 'invalid']));
+    await expect(manager.testModel({ ...masked, customHeaders: invalidHeaders })).rejects.toThrow('HTTP 401');
+    expect(requests).toBe(3);
+  });
+
+  it.each([401, 403, 404, 405])('never treats a Workers AI HTTP %i as a successful connection', async (status) => {
+    const url = await server((_req, res) => {
+      res.writeHead(status);
+      res.end(JSON.stringify({ errors: [{ message: 'private-workers-token' }] }));
+    });
+    const { manager } = setup();
+    const request = manager.testModel({
+      provider: 'workers-ai',
+      apiUrl: `${url}${workersPath}/v1`,
+      apiKey: 'private-workers-token',
+    });
+    await expect(request).rejects.toThrow(`HTTP ${status}`);
+    await expect(request).rejects.not.toThrow('private-workers-token');
+    await expect(request).rejects.toThrow(
+      status === 401 || status === 403 ? 'Workers AI' : 'generation was not tested',
+    );
+  });
+
+  it.each(['failure', 'repeat', 'empty', 'wrong-page'])(
+    'rejects a Workers AI %s catalog rather than reporting success',
+    async (kind) => {
+      const url = await server((req, res) => {
+        const page = Number(new URL(req.url!, 'http://localhost').searchParams.get('page'));
+        res.end(
+          JSON.stringify({
+            success: kind !== 'failure',
+            result: kind === 'empty' ? [] : [{ name: '@cf/text-one' }],
+            result_info: { page: kind === 'wrong-page' ? 3 : page, total_count: 5 },
+          }),
+        );
+      });
+      const { manager } = setup();
+      await expect(
+        manager.discoverModels({ provider: 'workers-ai', apiUrl: `${url}${workersPath}/v1`, apiKey: 'secret' }),
+      ).rejects.toThrow(/failed|repeated|incomplete|unexpected/);
+    },
+  );
+
+  it('never forwards Workers AI credentials across a catalog redirect', async () => {
+    let redirected = false;
+    const destination = await server((_req, res) => {
+      redirected = true;
+      res.end('{}');
+    });
+    const url = await server((_req, res) => {
+      res.writeHead(302, { Location: destination });
+      res.end();
+    });
+    const { manager } = setup();
+    await expect(
+      manager.discoverModels({
+        provider: 'workers-ai',
+        apiUrl: `${url}${workersPath}/v1`,
+        apiKey: 'private-workers-token',
+      }),
+    ).rejects.toThrow('HTTP 302');
+    expect(redirected).toBe(false);
+  });
+
   it('discovers a large OpenRouter-style catalog with metadata and skips non-chat outputs', async () => {
     const catalog = Array.from({ length: 450 }, (_, index) => ({
       id: `vendor/model-${index}`,

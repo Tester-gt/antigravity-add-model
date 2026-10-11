@@ -762,6 +762,26 @@ window.addEventListener('DOMContentLoaded', () => {
       );
       const preset = () => providers.find((value) => value.id === provider.value) || providers[0];
       const apiUrl = field(body, 'API URL', 'agy-api-url', existing?.apiUrl || preset().defaultUrl, 'url');
+      const workersHint = element(
+        'p',
+        'agy-muted',
+        'Cloudflare: replace ACCOUNT_ID in the API URL with your 32-character Account ID. Use the Workers AI API token template, or keep your existing authentication headers. Model discovery verifies catalog access; generation is not tested.',
+      );
+      body.append(workersHint);
+      function workersConnection(): boolean {
+        if (provider.value === 'workers-ai') return true;
+        try {
+          const url = new URL(apiUrl.value);
+          return url.origin === 'https://api.cloudflare.com' && /^\/client\/v4\/accounts\//.test(url.pathname);
+        } catch {
+          return false;
+        }
+      }
+      const updateWorkersHint = () => {
+        workersHint.hidden = !workersConnection();
+      };
+      apiUrl.addEventListener('input', updateWorkersHint);
+      updateWorkersHint();
       const apiKey = field(
         body,
         'API key',
@@ -996,16 +1016,43 @@ window.addEventListener('DOMContentLoaded', () => {
       discoverySearch.addEventListener('input', () => showChoices());
       let choices: ModelChoice[] = [];
       const selected = new Set<string>();
+      function hasWorkersAuthentication(customHeaders?: Record<string, unknown>): boolean {
+        const authentication = Object.fromEntries(
+          Object.entries(customHeaders || {}).map(([key, value]) => [
+            key.toLowerCase(),
+            typeof value === 'string' ? value.trim() : '',
+          ]),
+        );
+        return !!(
+          (apiKey.value.trim() && apiKey.value.trim() !== 'none') ||
+          authentication.authorization ||
+          (authentication['x-auth-key'] && authentication['x-auth-email'])
+        );
+      }
       function connection(): Partial<CustomModelEntry> {
+        const endpoint = validUrl(apiUrl.value);
+        const customHeaders = readJson(headers, 'Custom headers');
+        if (workersConnection()) {
+          if (
+            !/^\/client\/v4\/accounts\/[a-f0-9]{32}\/ai\/v1(?:\/chat\/completions)?\/?$/i.test(
+              new URL(endpoint).pathname,
+            )
+          )
+            throw new Error('Replace ACCOUNT_ID in the Cloudflare API URL with your 32-character Account ID.');
+          if (apiFormat.value !== 'openai')
+            throw new Error('Cloudflare Workers AI requires the OpenAI compatible API format.');
+          if (!hasWorkersAuthentication(customHeaders))
+            throw new Error('Enter a Cloudflare Workers AI API token or authentication headers.');
+        }
         return {
           provider: provider.value,
-          apiUrl: validUrl(apiUrl.value),
+          apiUrl: endpoint,
           apiKey: apiKey.value.trim() || 'none',
           apiFormat: apiFormat.value,
           name: existing?.name,
           allowUnauthorized: tls.value === 'true',
           externalModelName: modelId.value.trim(),
-          customHeaders: readJson(headers, 'Custom headers'),
+          customHeaders,
           rawUrl: rawUrl.value === 'true',
           ...(provider.value === 'google-cloudcode'
             ? {
@@ -1022,7 +1069,8 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       function modelConfig(id: string, title: string, localName?: string): CustomModelEntry {
         if (!id.trim() || /\s/.test(id.trim())) throw new Error('Enter a model ID without spaces.');
-        if (preset().keyRequired && !apiKey.value.trim()) throw new Error('Enter an API key for this provider.');
+        if (preset().keyRequired && !apiKey.value.trim() && !workersConnection())
+          throw new Error('Enter an API key for this provider.');
         if (provider.value === 'google-cloudcode' && !readAccounts().some((account) => account.enabled !== false))
           throw new Error('Add and enable at least one Google account.');
         const maxRetries = readNumber(retries, 'Maximum retries');
@@ -1226,6 +1274,8 @@ window.addEventListener('DOMContentLoaded', () => {
         apiUrl.value = preset().defaultUrl;
         apiFormat.value = preset().apiFormat;
         apiKey.value = '';
+        apiKey.placeholder = preset().keyRequired ? 'Enter provider API key' : 'Optional for local servers';
+        updateWorkersHint();
         choices = [];
         selected.clear();
         discoverySearch.value = '';

@@ -27,6 +27,11 @@ export const PROVIDERS: readonly ProviderPreset[] = [
     false,
   ),
   preset('openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1/chat/completions'),
+  preset(
+    'workers-ai',
+    'Cloudflare Workers AI',
+    'https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1/chat/completions',
+  ),
   preset('together', 'Together AI', 'https://api.together.ai/v1/chat/completions'),
   preset('huggingface', 'Hugging Face Inference Providers', 'https://router.huggingface.co/v1/chat/completions'),
   preset('sambanova', 'SambaNova', 'https://api.sambanova.ai/v1/chat/completions'),
@@ -66,6 +71,23 @@ export const PROVIDERS: readonly ProviderPreset[] = [
 
 export function getProvider(id: string): ProviderPreset | undefined {
   return PROVIDERS.find((provider) => provider.id === id);
+}
+
+/** Explicit presets can use a proxy origin; only the official HTTPS origin is auto-detected. */
+export function workersAiAccountPath(apiUrl: string, provider?: string): string | undefined {
+  const url = new URL(apiUrl);
+  if (
+    provider !== 'workers-ai' &&
+    !(url.origin === 'https://api.cloudflare.com' && /^\/client\/v4\/accounts\//.test(url.pathname))
+  )
+    return undefined;
+  const match = url.pathname.match(/^(\/client\/v4\/accounts\/([^/]+)\/ai)\/v1(?:\/chat\/completions)?\/?$/);
+  if (!match || !/^[a-f0-9]{32}$/i.test(match[2])) {
+    throw new Error(
+      'Set the Cloudflare API URL to https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1/chat/completions using your 32-character Account ID.',
+    );
+  }
+  return match[1];
 }
 
 /** Defaults for old files without apiFormat must not silently change protocol. */

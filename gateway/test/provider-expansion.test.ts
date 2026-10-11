@@ -10,6 +10,7 @@ import { createAdapter } from '../src/adapter.js';
 import { buildProviders } from '../src/config.js';
 import { openAIEndpoint } from '../src/provider-endpoints.js';
 import { httpPool } from '../src/http-pool.js';
+import { mapTools } from '../src/mapper.js';
 
 const additions = [
   'together',
@@ -405,4 +406,124 @@ test('discovery bounds both advertised/streamed payload size and model count', a
     assert.deepEqual(result.models, []);
     assert.ok(!JSON.stringify(result).includes('bounded-secret'));
   }
+});
+
+test('Workers AI registers, requires an account URL and sends normalized tools to its account chat endpoint', async () => {
+  registerBuiltinPlugins();
+  const definition = getProviderDefinition('workers-ai')!;
+  assert.equal(definition?.envKey, 'WORKERS_AI_API_KEY');
+  assert.equal(definition?.baseUrlEnv, 'WORKERS_AI_BASE_URL');
+  assert.throws(() => createAdapter({ id: 'workers-ai', priority: 0, enabled: true, apiKey: 'secret' }), /account|WORKERS_AI_BASE_URL/i);
+  const origin = await serve(async (req, res) => {
+    assert.equal(req.url, '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1/chat/completions');
+    assert.equal(req.headers.authorization, 'Bearer workers-key');
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    assert.equal(body.model, '@cf/vendor/chat');
+    assert.equal(body.tools[0].function.parameters.properties.path.minLength, 1);
+    res.setHeader('content-type', 'text/event-stream');
+    res.end('data: {"choices":[{"delta":{"content":"accepted"}}]}\n\ndata: [DONE]\n\n');
+  });
+  env('WORKERS_AI_API_KEY', 'workers-key');
+  env('WORKERS_AI_BASE_URL', origin + '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1');
+  const cfg = buildProviders(['workers-ai'])[0];
+  const adapter = createAdapter(cfg);
+  const tools = mapTools([{ functionDeclarations: [{ name: 'read_file', parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', minLength: '1' } } } }] }] as any);
+  const chunks = [];
+  for await (const chunk of adapter.stream('@cf/vendor/chat', [{ role: 'user', content: 'Hi' }], tools)) chunks.push(chunk);
+  assert.equal(chunks[0].content, 'accepted');
+});
+
+test('Workers AI discovers account-scoped paginated chat catalogs and selects result names rather than UUIDs', async () => {
+  const seen: URL[] = [];
+  const origin = await serve((req, res) => {
+    const url = new URL(req.url!, 'http://localhost');
+    seen.push(url);
+    assert.equal(req.headers.authorization, 'Bearer catalog-key');
+    assert.equal(url.pathname, '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/models/search');
+    assert.equal(url.searchParams.get('format'), 'openrouter');
+    assert.equal(url.searchParams.get('task'), 'Text Generation');
+    assert.equal(url.searchParams.get('per_page'), '100');
+    res.setHeader('content-type', 'application/json');
+    const page = Number(url.searchParams.get('page'));
+    res.end(JSON.stringify({
+      success: true,
+      result: page === 1 ? [
+        { id: 'uuid-1', name: '@cf/vendor/chat', task: { name: 'Text Generation' } },
+        { id: 'uuid-2', name: '@cf/vendor/embed', task: { name: 'Text Embeddings' } },
+      ] : [{ id: 'uuid-3', name: '@cf/vendor/chat-2', task: { name: 'Text Generation' } }],
+      result_info: { page, per_page: 2, total_count: 3, total_pages: 2 },
+    }));
+  });
+  env('WORKERS_AI_BASE_URL', origin + '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1/chat/completions');
+  const result = await fetchProviderModels('workers-ai', 'catalog-key');
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.models, ['@cf/vendor/chat', '@cf/vendor/chat-2']);
+  assert.equal(result.modelDetails?.[0].supportsTools, undefined);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].searchParams.get('page'), '2');
+});
+
+test('Workers AI parses marketplace metadata without inventing tools and excludes non-chat output', () => {
+  assert.deepEqual(parseProviderModelDetails('workers-ai', { data: [
+    { id: '@cf/vendor/chat', name: 'Chat', context_length: 32000, supported_parameters: ['tools'], architecture: { input_modalities: ['text'], output_modalities: ['text'] } },
+    { id: '@cf/vendor/unknown' },
+    { id: '@cf/vendor/image', architecture: { output_modalities: ['image'] } },
+  ] }), [
+    { id: '@cf/vendor/chat', displayName: 'Chat', contextWindow: 32000, supportsTools: true, supportsVision: false },
+    { id: '@cf/vendor/unknown' },
+  ]);
+});
+
+test('Workers AI rejects missing accounts, unsuccessful envelopes and HTTP errors without exposing tokens', async () => {
+  const noAccount = await fetchProviderModels('workers-ai', 'workers-secret');
+  assert.match(noAccount.error || '', /WORKERS_AI_BASE_URL.*account/i);
+  let status = 200;
+  const origin = await serve((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ success: false, errors: [{ message: 'workers-secret' }], result: [] }));
+  });
+  env('WORKERS_AI_BASE_URL', origin + '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1');
+  for (status of [200, 401, 403]) {
+    const result = await fetchProviderModels('workers-ai', 'workers-secret', true);
+    assert.ok(result.error);
+    assert.deepEqual(result.models, []);
+    assert.ok(!JSON.stringify(result).includes('workers-secret'));
+  }
+});
+
+test('Workers AI follows full marketplace pages without pagination metadata and rejects incomplete pages', async () => {
+  let requests = 0;
+  let incomplete = false;
+  const origin = await serve((_req, res) => {
+    requests++;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(incomplete ? { success: true, result: [], result_info: { total_count: 2 } } : {
+      data: requests === 1 ? Array.from({ length: 100 }, (_, i) => ({ id: `@cf/vendor/model-${i}` })) : [{ id: '@cf/vendor/last' }],
+    }));
+  });
+  env('WORKERS_AI_BASE_URL', origin + '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1');
+  const result = await fetchProviderModels('workers-ai', 'catalog-key');
+  assert.equal(result.error, undefined);
+  assert.equal(result.models.length, 101);
+  assert.equal(requests, 2);
+  incomplete = true;
+  const failure = await fetchProviderModels('workers-ai', 'catalog-key', true);
+  assert.ok(failure.error);
+  assert.deepEqual(failure.models, []);
+});
+
+test('Workers AI rejects repeated pages instead of reporting a truncated catalog as complete', async () => {
+  let requests = 0;
+  const origin = await serve((_req, res) => {
+    requests++;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ success: true, result: [{ name: '@cf/vendor/repeated', id: 'uuid' }], result_info: { total_count: 2 } }));
+  });
+  env('WORKERS_AI_BASE_URL', origin + '/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1');
+  const result = await fetchProviderModels('workers-ai', 'catalog-key');
+  assert.ok(result.error);
+  assert.deepEqual(result.models, []);
+  assert.equal(requests, 2);
 });

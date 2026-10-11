@@ -66,6 +66,64 @@ function validateToolArguments(value: unknown): void {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
     throw new UpstreamError('Upstream returned invalid tool arguments.', 502, false, 0, false);
 }
+
+/** Classify schema errors without returning provider text, credentials or echoed prompts. */
+async function toolSchemaErrorHint(upstream: http.IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  const limit = 16 * 1024;
+  const timer = setTimeout(() => upstream.destroy(), 1000);
+  timer.unref();
+  try {
+    for await (const chunk of upstream) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const bounded = bytes.subarray(0, limit - size);
+      chunks.push(bounded);
+      size += bounded.length;
+      if (size >= limit) break;
+    }
+  } catch {
+    // Diagnostics must not replace the original HTTP status on a broken response.
+  } finally {
+    clearTimeout(timer);
+    upstream.destroy();
+  }
+  let message = Buffer.concat(chunks).toString('utf8').trim();
+  if (message.startsWith('{') || message.startsWith('[')) {
+    try {
+      const data = JSON.parse(message) as {
+        message?: unknown;
+        error?: { message?: unknown };
+        errors?: { message?: unknown }[];
+      };
+      message = [
+        data?.message,
+        data?.error?.message,
+        ...(Array.isArray(data?.errors) ? data.errors.map((item) => item?.message) : []),
+      ]
+        .filter((value): value is string => typeof value === 'string')
+        .join('\n');
+    } catch {
+      return '';
+    }
+  }
+  if (!/\b(?:schema|parameters)\b/i.test(message) || !/\b(?:invalid|rejected|not of type|must be)\b/i.test(message))
+    return '';
+  const bounds = [
+    'minLength',
+    'maxLength',
+    'minItems',
+    'maxItems',
+    'minProperties',
+    'maxProperties',
+    'minContains',
+    'maxContains',
+  ].filter((keyword) => new RegExp(`\\b${keyword}\\b`).test(message));
+  return bounds.length
+    ? ` Tool schema rejected; check non-negative integer constraints (${bounds.join(', ')}).`
+    : ' Tool schema rejected; check the declared parameter types and constraints.';
+}
+
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -278,9 +336,10 @@ export async function runCustomModelRequest(
           const status = upstream.statusCode || 502;
           if (status < 200 || status >= 300) {
             const retryAfter = parseRetryAfter(upstream.headers['retry-after']);
+            const hint = status === 400 || status === 422 ? await toolSchemaErrorHint(upstream) : '';
             upstream.destroy();
             throw new UpstreamError(
-              `Upstream returned HTTP ${status}.`,
+              `Upstream returned HTTP ${status}.${hint}`,
               status,
               status === 408 || status === 429 || status >= 500,
               retryAfter,

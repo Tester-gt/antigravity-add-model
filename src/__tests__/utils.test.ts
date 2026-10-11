@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   fixParamTypes,
+  normalizeToolSchema,
   normalizeToolArgs,
   translateToolCallToNative,
   formatTranslatedResponse,
@@ -61,6 +62,110 @@ describe('fixParamTypes', () => {
 
   it('should handle empty object', () => {
     expect(() => fixParamTypes({})).not.toThrow();
+  });
+});
+
+describe('normalizeToolSchema', () => {
+  it.each([
+    'minLength',
+    'maxLength',
+    'minItems',
+    'maxItems',
+    'minProperties',
+    'maxProperties',
+    'minContains',
+    'maxContains',
+  ])('converts canonical non-negative integer strings for %s', (keyword) => {
+    expect(normalizeToolSchema({ [keyword]: '0' })).toEqual({ [keyword]: 0 });
+    expect(normalizeToolSchema({ [keyword]: '12' })).toEqual({ [keyword]: 12 });
+    expect(normalizeToolSchema({ [keyword]: '9007199254740991' })).toEqual({ [keyword]: Number.MAX_SAFE_INTEGER });
+  });
+
+  it.each(['', ' ', ' 1', '1 ', '+1', '-1', '1.5', '1.0', '01', '1e2', '0x10', 'Infinity', '9007199254740992'])(
+    'preserves invalid or lossy integer-bound string %j',
+    (bound) => {
+      const schema = { minLength: bound, maxItems: bound };
+      expect(normalizeToolSchema(schema)).toEqual(schema);
+    },
+  );
+
+  it('preserves existing numbers and non-integer constraint keywords', () => {
+    const schema = { minLength: 1, maxItems: 0, minimum: '1.5', maximum: '10', multipleOf: '0.1' };
+    expect(normalizeToolSchema(schema)).toEqual(schema);
+  });
+
+  it('normalizes nested schemas while preserving literal values, refs, and the original declaration', () => {
+    const literal = { type: 'STRING', minLength: '7', properties: { nested: { maxLength: '9' } } };
+    const schema = {
+      type: 'OBJECT',
+      minProperties: '1',
+      properties: {
+        minLength: { type: ['STRING', 'NULL'], minLength: '1', default: '1', enum: ['1'] },
+        values: { type: 'ARRAY', maxItems: '2', items: { type: 'STRING', maxLength: '4' } },
+      },
+      patternProperties: { '^x-': { type: 'STRING', minLength: '2' } },
+      $defs: { path: { type: 'STRING', minLength: '3' } },
+      definitions: { legacy: { type: 'ARRAY', minItems: '1' } },
+      dependentSchemas: { minLength: { maxProperties: '4' } },
+      dependencies: { minLength: ['maxLength'], value: { minProperties: '1' } },
+      additionalProperties: false,
+      required: ['minLength'],
+      default: literal,
+      enum: [literal],
+      const: literal,
+      examples: [literal],
+      example: literal,
+      'x-metadata': literal,
+      $ref: '#/$defs/path',
+    };
+    const original = structuredClone(schema);
+    const expected = {
+      ...original,
+      type: 'object',
+      minProperties: 1,
+      properties: {
+        minLength: { type: ['string', 'null'], minLength: 1, default: '1', enum: ['1'] },
+        values: { type: 'array', maxItems: 2, items: { type: 'string', maxLength: 4 } },
+      },
+      patternProperties: { '^x-': { type: 'string', minLength: 2 } },
+      $defs: { path: { type: 'string', minLength: 3 } },
+      definitions: { legacy: { type: 'array', minItems: 1 } },
+      dependentSchemas: { minLength: { maxProperties: 4 } },
+      dependencies: { minLength: ['maxLength'], value: { minProperties: 1 } },
+    };
+    const normalized = normalizeToolSchema(schema);
+    expect(normalized).toEqual(expected);
+    expect(normalized).not.toBe(schema);
+    expect(schema).toEqual(original);
+  });
+
+  it.each(['allOf', 'anyOf', 'oneOf', 'prefixItems', 'items'])(
+    'normalizes schema arrays under %s, including tuple items and boolean schemas',
+    (keyword) => {
+      const schema = { [keyword]: [{ type: 'STRING', minLength: '1' }, false, { maxItems: '2' }] };
+      expect(normalizeToolSchema(schema)).toEqual({
+        [keyword]: [{ type: 'string', minLength: 1 }, false, { maxItems: 2 }],
+      });
+    },
+  );
+
+  it.each([
+    'additionalProperties',
+    'additionalItems',
+    'unevaluatedProperties',
+    'unevaluatedItems',
+    'propertyNames',
+    'contains',
+    'not',
+    'if',
+    'then',
+    'else',
+    'contentSchema',
+  ])('normalizes the subschema under %s while preserving boolean schemas', (keyword) => {
+    expect(normalizeToolSchema({ [keyword]: { type: 'STRING', minLength: '1' } })).toEqual({
+      [keyword]: { type: 'string', minLength: 1 },
+    });
+    expect(normalizeToolSchema({ [keyword]: false })).toEqual({ [keyword]: false });
   });
 });
 

@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Cloudflare Workers AI and tool-schema bounds
+
+- Add a Cloudflare Workers AI preset to the desktop and optional gateway, with account-specific endpoints, API token configuration, and model discovery through Cloudflare's paginated model search API.
+- Fix string-encoded integer constraints such as `minLength: "1"` in tool declarations, reported in [issue #10](https://github.com/vahapogut/antigravity-add-model/issues/10). Normalize schema nodes across OpenAI-compatible, Anthropic, and gateway requests while preserving literal data and the original declarations.
+- Add bounded, privacy-preserving desktop HTTP 400/422 schema diagnostics and regressions for JSON/streaming function calls. See [Workers AI setup](docs/providers.md#cloudflare-workers-ai) for account configuration and verification limits.
+
 ### Unreleased — Tool failure feedback
 
 - Preserve explanatory text beside tool results when converting conversation history for OpenAI-compatible and Anthropic providers. An empty tool result no longer hides an error sent in a sibling text part.

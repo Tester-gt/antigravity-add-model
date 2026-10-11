@@ -4,7 +4,7 @@ import { poolFetch } from '../http-pool.js';
 import { getEffortForModel } from '../reasoning-effort.js';
 import { logger } from '../logger.js';
 import { parseToolArgs } from '../utils/parse-tool-args.js';
-import { openAIEndpoint } from '../provider-endpoints.js';
+import { openAIEndpoint, workersAIBaseUrl } from '../provider-endpoints.js';
 
 /**
  * Known field names that providers use to emit reasoning/thinking content.
@@ -42,6 +42,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
   protected supportsImages: boolean;
 
   constructor(provider: string, baseUrl: string, apiKey: string) {
+    if (provider === 'workers-ai') workersAIBaseUrl(baseUrl);
     this.provider = provider;
     // Validation and joining happen in one helper shared with model discovery.
     openAIEndpoint(baseUrl, 'chat/completions');

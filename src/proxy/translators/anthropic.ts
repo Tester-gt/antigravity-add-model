@@ -6,7 +6,7 @@ import * as path from 'path';
 
 import log from 'electron-log';
 import {
-  fixParamTypes,
+  normalizeToolSchema,
   translateToolCallToNative,
   formatTranslatedResponse,
   normalizeToolArgs,
@@ -157,15 +157,7 @@ function mapGeminiToolsToAnthropic(geminiTools: GeminiTool[]): AnthropicTool[] {
     if (toolGroup.functionDeclarations && Array.isArray(toolGroup.functionDeclarations)) {
       for (const func of toolGroup.functionDeclarations) {
         const declaration = func.parametersJsonSchema ?? func.parameters;
-        const params = declaration
-          ? (JSON.parse(JSON.stringify(declaration)) as Record<string, unknown>)
-          : { type: 'OBJECT', properties: {} };
-        if (params.type && typeof params.type === 'string') {
-          (params as Record<string, string>).type = (params.type as string).toLowerCase();
-        }
-        if (params.properties) {
-          fixParamTypes(params.properties as Record<string, unknown>);
-        }
+        const params = normalizeToolSchema(declaration ?? { type: 'object', properties: {} });
         anthropicTools.push({
           name: func.name,
           description: func.description || '',

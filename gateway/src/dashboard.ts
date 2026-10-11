@@ -12,7 +12,7 @@ import { requestStore } from './request-store.js';
 import { reloadRouter, streamResponse } from './engine.js';
 import * as db from './db.js';
 import { USER_ENV_PATH, USER_LOGS_DIR, dataFile } from './data-paths.js';
-import { readSettings, writeSettings } from './settings.js';
+import { readSettings, writeSettings, SettingsValidationError } from './settings.js';
 import { BUILTIN_PROVIDERS, getProviderApiKey } from './provider-catalog.js';
 import { getAllPricing, savePricing, reload as reloadPricing } from './pricing.js';
 import { setRateLimitConfig, getRateLimitConfig, getRateLimitStats, resetRateLimits } from './rate-limiter.js';
@@ -246,7 +246,11 @@ function providerSettings(): Record<string, string> {
 }
 
 function writeEnv(updates: Record<string, string>): boolean {
-  try { writeSettings(updates); return true; } catch { return false; }
+  try { writeSettings(updates); return true; }
+  catch (error) {
+    if (error instanceof SettingsValidationError) throw error;
+    return false;
+  }
 }
 
 function readModels(): Record<string, string> {

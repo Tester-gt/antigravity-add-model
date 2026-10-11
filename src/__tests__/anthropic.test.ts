@@ -61,6 +61,29 @@ beforeEach(() => {
 // ─── mapGeminiToAnthropic ──────────────────────────────────────────────────
 
 describe('mapGeminiToAnthropic', () => {
+  it.each(['parameters', 'parametersJsonSchema'] as const)(
+    'converts serialized minLength in %s before sending an agent tool to the provider',
+    (schemaField) => {
+      const schema = {
+        type: 'OBJECT',
+        properties: { command: { type: 'STRING', minLength: '1' } },
+        required: ['command'],
+        additionalProperties: false,
+      };
+      const original = structuredClone(schema);
+      const result = mapGeminiToAnthropic(
+        { contents: [], tools: [{ functionDeclarations: [{ name: 'run_command', [schemaField]: schema }] }] },
+        'claude-agent-model',
+      );
+      expect(result.tools![0].input_schema).toEqual({
+        ...schema,
+        type: 'object',
+        properties: { command: { type: 'string', minLength: 1 } },
+      });
+      expect(schema).toEqual(original);
+    },
+  );
+
   it('preserves parametersJsonSchema properties, references, and additional-property constraints', () => {
     const parametersJsonSchema = {
       type: 'object',

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { poolFetch } from './http-pool.js';
 import { logger } from './logger.js';
 import { BUILTIN_PROVIDERS, getProviderApiKey, getProviderDefinition } from './provider-catalog.js';
-import { openAIEndpoint, providerUrl } from './provider-endpoints.js';
+import { openAIEndpoint, providerUrl, workersAIBaseUrl } from './provider-endpoints.js';
 
 export interface ProviderModelDetails {
   id: string;
@@ -43,7 +43,8 @@ const NON_CHAT_TYPES = new Set([
 ]);
 function modelItems(payload: unknown): unknown[] {
   const data = object(payload);
-  const items = Array.isArray(payload) ? payload : (data.data ?? data.models ?? data.output?.models);
+  if (data.success === false) throw new Error('Provider rejected model discovery');
+  const items = Array.isArray(payload) ? payload : (data.data ?? data.models ?? data.output?.models ?? data.result);
   if (!Array.isArray(items)) throw new Error('Provider response has no model list');
   return items;
 }
@@ -79,6 +80,10 @@ export function parseProviderModelDetails(provider: string, payload: unknown): P
   const models = new Map<string, ProviderModelDetails>();
   for (const value of items) {
     const model = object(value);
+    if (provider === 'workers-ai') {
+      const task = typeof model.task === 'string' ? model.task : model.task?.name;
+      if (typeof task === 'string' && task.toLowerCase() !== 'text generation') continue;
+    }
     if (typeof model.type === 'string' && NON_CHAT_TYPES.has(model.type.toLowerCase())) continue;
     const outputs = model.architecture?.output_modalities;
     if (Array.isArray(outputs) && !outputs.includes('text')) continue;
@@ -101,7 +106,8 @@ export function parseProviderModelDetails(provider: string, payload: unknown): P
       ? model.providers.filter((item: unknown) => object(item).status === 'live')
       : undefined;
     if (provider === 'huggingface' && live && live.length === 0) continue;
-    const rawId = provider === 'dashscope' ? model.model : (model.id ?? model.name);
+    const rawId = provider === 'dashscope' ? model.model :
+      provider === 'workers-ai' && Array.isArray(object(payload).result) ? model.name : (model.id ?? model.name);
     if (typeof rawId !== 'string' || !rawId.trim() || /[\r\n\0]/.test(rawId)) continue;
     const id = provider === 'google' ? rawId.replace(/^models\//, '') : rawId;
     const result: ProviderModelDetails = { id };
@@ -137,6 +143,7 @@ export function parseProviderModelDetails(provider: string, payload: unknown): P
     else if (typeof model.capabilities?.function_calling === 'boolean')
       result.supportsTools = model.capabilities.function_calling;
     else if (Array.isArray(model.features)) result.supportsTools = model.features.includes('function-calling');
+    else if (Array.isArray(model.supported_parameters)) result.supportsTools = model.supported_parameters.includes('tools');
     if (provider === 'huggingface' && live?.length) {
       // Automatic routing may choose any live provider. Unknown limits stay unknown.
       const limits = live.map((item: unknown) => positiveInteger(object(item).context_length));
@@ -152,6 +159,15 @@ export function parseProviderModelDetails(provider: string, payload: unknown): P
 }
 
 function modelsUrl(provider: string, baseUrl: string): URL {
+  if (provider === 'workers-ai') {
+    const url = workersAIBaseUrl(baseUrl);
+    url.pathname = url.pathname.replace(/\/v1$/, '/models/search');
+    url.searchParams.set('format', 'openrouter');
+    url.searchParams.set('task', 'Text Generation');
+    url.searchParams.set('per_page', '100');
+    url.searchParams.set('page', '1');
+    return url;
+  }
   if (provider === 'dashscope' || provider === 'fireworks') {
     const url = providerUrl(baseUrl);
     const basePath = url.pathname.replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
@@ -180,6 +196,12 @@ export async function fetchProviderModels(provider: string, apiKey?: string, for
   const definition = getProviderDefinition(provider);
   if (!definition) return { models: [], fetchedAt: Date.now(), error: 'Unknown provider' };
   const baseUrl = process.env[definition.baseUrlEnv] || definition.baseUrl;
+  if (provider === 'workers-ai') {
+    try { workersAIBaseUrl(baseUrl); }
+    catch {
+      return { models: [], fetchedAt: Date.now(), error: 'Set WORKERS_AI_BASE_URL with your actual account ID: https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1' };
+    }
+  }
   const key = apiKey || getProviderApiKey(definition);
   if (definition.envKey && !key)
     return { models: [], fetchedAt: Date.now(), error: `No API key configured — set ${definition.envKey} in .env` };
@@ -216,11 +238,26 @@ export async function fetchProviderModels(provider: string, apiKey?: string, for
       }
       const payload = await readModelList(response);
       const count = modelItems(payload).length;
+      if (provider === 'workers-ai' && count > 0) {
+        const signature = createHash('sha256').update(JSON.stringify(modelItems(payload))).digest('hex');
+        if (pages.has(signature)) throw new Error('Provider returned a repeated model page');
+        pages.add(signature);
+      }
       seen += count;
       if (seen > MAX_MODEL_ENTRIES) throw new Error('Provider model list has too many entries');
       for (const model of parseProviderModelDetails(provider, payload)) details.set(model.id, model);
       const data = object(payload);
-      if (provider === 'dashscope') {
+      if (provider === 'workers-ai') {
+        const pagination = object(data.result_info);
+        const total = pagination.total_count;
+        const knownTotal = Number.isSafeInteger(total) && total >= 0;
+        const totalPages = positiveInteger(pagination.total_pages);
+        if (knownTotal && total > MAX_MODEL_ENTRIES) throw new Error('Provider model list has too many entries');
+        if (pagination.page !== undefined && pagination.page !== page) throw new Error('Provider returned an unexpected page');
+        if (count === 0 && (knownTotal && seen < total || totalPages && page < totalPages)) throw new Error('Provider returned an incomplete model list');
+        if (knownTotal ? seen >= total : totalPages ? page >= totalPages : count < 100) break;
+        url.searchParams.set('page', String(page + 1));
+      } else if (provider === 'dashscope') {
         const total = data.output?.total;
         const knownTotal = Number.isSafeInteger(total) && total >= 0;
         if (knownTotal && total > MAX_MODEL_ENTRIES) throw new Error('Provider model list has too many entries');

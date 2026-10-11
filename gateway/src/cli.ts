@@ -34,7 +34,10 @@ async function main(): Promise<void> {
         const key = await rl.question('Provider API key (empty keeps current; local services need none): ');
         const definition = getProviderDefinition(provider);
         if (!definition) throw new Error('Select a provider from the supported list');
-        writeSettings({ PROVIDER_PRIORITY: provider, ...(key && definition.envKey ? { [definition.envKey]: key } : {}) });
+        const baseUrl = provider === 'workers-ai'
+          ? (await rl.question('Workers AI base URL (https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1; empty keeps current): ')).trim()
+          : '';
+        writeSettings({ PROVIDER_PRIORITY: provider, ...(key && definition.envKey ? { [definition.envKey]: key } : {}), ...(baseUrl ? { [definition.baseUrlEnv]: baseUrl } : {}) });
       } finally { rl.close(); }
     }
     const active = readSettings();

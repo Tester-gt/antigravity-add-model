@@ -51,7 +51,7 @@ Provider adapters cover OpenAI-compatible chat, Anthropic messages, Google
 Gemini, and OpenCode Zen/Go chat, messages, and Responses protocols. Presets
 include OpenAI, Anthropic, Google, OpenRouter, Together AI, Hugging Face Inference
 Providers, SambaNova, SiliconFlow, Novita AI, Alibaba Cloud Model Studio,
-DeepSeek, Mistral, xAI, Cerebras, Fireworks AI, NVIDIA, Groq, Ollama, LM Studio,
+DeepSeek, Mistral, xAI, Cerebras, Fireworks AI, Cloudflare Workers AI, NVIDIA, Groq, Ollama, LM Studio,
 vLLM, OpenCode Zen, and OpenCode Go. Configure keys as `<PROVIDER>_API_KEY` and optional custom endpoints
 as `<PROVIDER>_BASE_URL`; Zen uses `OPENCODE_API_KEY` / `OPENCODE_BASE_URL`,
 and Go uses `OPENCODE_GO_API_KEY` / `OPENCODE_GO_BASE_URL`.
@@ -59,7 +59,17 @@ and Go uses `OPENCODE_GO_API_KEY` / `OPENCODE_GO_BASE_URL`.
 Dashboard provider forms, routing selectors, and **Browse Models** use the same
 [provider catalog](src/provider-catalog.ts). Save a provider key in **Config**,
 then browse its live models and map the desired IDs to aliases. Base URL
-overrides are optional; clearing an override restores its preset default.
+overrides are optional except for **Cloudflare Workers AI**, which requires your
+account URL. Set `WORKERS_AI_BASE_URL` to
+`https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1` (replace
+`YOUR_ACCOUNT_ID` with your 32-character Cloudflare account ID) and set
+`WORKERS_AI_API_KEY` to a Workers AI API token before selecting `workers-ai` in
+provider priority. Save both values together in the dashboard; with CLI
+`config set`, save the base URL before selecting the provider. Interactive
+`setup` also prompts for this URL. Browse Models uses Cloudflare's model-search
+API; select a tool-capable model for Agent mode. See the
+[Workers AI setup guide](../docs/providers.md#cloudflare-workers-ai).
+For other providers, clearing an override restores its preset default.
 Saved keys remain masked and leaving a key field empty preserves it. See
 [provider setup and endpoints](../docs/providers.md) for exact IDs, endpoint
 formats, and regional/account requirements.

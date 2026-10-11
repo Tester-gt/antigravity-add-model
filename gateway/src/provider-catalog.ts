@@ -173,6 +173,13 @@ const DEFINITIONS: Omit<ProviderDef, 'baseUrlEnv'>[] = [
     baseUrl: 'https://api.fireworks.ai/inference/v1',
     adapterType: 'openai',
   },
+  {
+    id: 'workers-ai',
+    name: 'Cloudflare Workers AI',
+    envKey: 'WORKERS_AI_API_KEY',
+    baseUrl: 'https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1',
+    adapterType: 'openai',
+  },
 ];
 
 export const BUILTIN_PROVIDERS: ProviderDef[] = DEFINITIONS.map((def) => ({

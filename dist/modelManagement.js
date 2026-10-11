@@ -106,7 +106,11 @@ function requestJson(urlValue, headers = {}, allowUnauthorized = false) {
         req.end();
     });
 }
-function statusError(status) {
+function statusError(status, workersAi = false) {
+    if (workersAi && (status === 401 || status === 403))
+        return `Cloudflare authentication failed — check the Account ID and API token's Workers AI Read or Write permission (HTTP ${status}). Use the Workers AI API token template for generation.`;
+    if (workersAi && (status === 404 || status === 405))
+        return `Cloudflare model catalog is unavailable (HTTP ${status}). Check the account API URL. You can enter a model ID manually; generation was not tested.`;
     const messages = {
         401: 'Authentication rejected — check the API key',
         403: 'Access denied — check provider permissions',
@@ -119,6 +123,15 @@ function statusError(status) {
 function modelListUrl(apiUrl, format, provider) {
     const url = checkedUrl(apiUrl);
     url.search = '';
+    const workersPath = (0, providers_1.workersAiAccountPath)(apiUrl, provider);
+    if (workersPath) {
+        url.pathname = `${workersPath}/models/search`;
+        url.searchParams.set('format', 'openrouter');
+        url.searchParams.set('task', 'Text Generation');
+        url.searchParams.set('per_page', '100');
+        url.searchParams.set('page', '1');
+        return url.toString();
+    }
     let pathname = url.pathname.replace(/\/+$/, '');
     pathname = pathname
         .replace(/\/(chat\/completions|completions|responses|messages)$/, '')
@@ -150,13 +163,23 @@ function parseModels(data, provider) {
     if (!data || typeof data !== 'object')
         throw new Error('Provider did not return a JSON model list');
     const root = data;
-    const items = Array.isArray(data) ? data : Array.isArray(root.data) ? root.data : root.models || root.output?.models;
+    if (provider === 'workers-ai' && root.success === false)
+        throw new Error('Cloudflare model catalog request failed — check the Account ID and Workers AI token permissions');
+    const nativeWorkers = provider === 'workers-ai' && Array.isArray(root.result);
+    const items = nativeWorkers
+        ? root.result
+        : Array.isArray(data)
+            ? data
+            : Array.isArray(root.data)
+                ? root.data
+                : root.models || root.output?.models;
     if (!Array.isArray(items))
         throw new Error('Provider response has no model list');
     const positiveLimit = (...values) => values.find((value) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 1000000000);
     const seen = new Set();
     return items
         .filter((item) => item && typeof item === 'object')
+        .filter((item) => !nativeWorkers || !item.task?.name || item.task.name === 'Text Generation')
         .filter((item) => provider !== 'together' || item.type === 'chat')
         .filter((item) => provider !== 'fireworks' ||
         (item.supportsServerless !== false &&
@@ -185,7 +208,7 @@ function parseModels(data, provider) {
                 ? item.supported_parameters.some((value) => value === 'reasoning' || value === 'reasoning_effort')
                 : undefined;
         return {
-            id: String(item.id || item.model || item.name || '').replace(/^models\//, ''),
+            id: String(nativeWorkers ? item.name || '' : item.id || item.model || item.name || '').replace(/^models\//, ''),
             displayName: String(item.displayName || item.display_name || item.title || item.name || item.id || item.model || ''),
             ...(contextWindow ? { contextWindow } : {}),
             ...(maxOutputTokens ? { maxOutputTokens } : {}),
@@ -348,7 +371,19 @@ function createModelManager(directory, codec, openExternal, dependencies = { log
             return { success: true, models: await (0, googleAccounts_1.fetchGoogleModels)(account, input.apiUrl), status: 200 };
         }
         const model = resolveProbe(input);
+        const workersAi = !!(0, providers_1.workersAiAccountPath)(model.apiUrl, model.provider);
         const format = (0, providers_1.resolveApiFormat)(model.provider, model.apiFormat);
+        if (workersAi && format !== 'openai')
+            throw new Error('Cloudflare Workers AI requires the OpenAI compatible API format');
+        const authenticationHeaders = Object.fromEntries(Object.entries(model.customHeaders || {}).map(([key, value]) => [
+            key.toLowerCase(),
+            typeof value === 'string' ? value.trim() : '',
+        ]));
+        if (workersAi &&
+            (!model.apiKey || model.apiKey === 'none') &&
+            !authenticationHeaders.authorization &&
+            !(authenticationHeaders['x-auth-key'] && authenticationHeaders['x-auth-email']))
+            throw new Error('Enter a Cloudflare Workers AI API token or authentication headers');
         const headers = {};
         if (model.provider === 'fireworks') {
             if (model.apiKey)
@@ -363,7 +398,7 @@ function createModelManager(directory, codec, openExternal, dependencies = { log
             if (model.apiKey)
                 headers['x-goog-api-key'] = model.apiKey;
         }
-        else if (model.apiKey)
+        else if (model.apiKey && (!workersAi || model.apiKey !== 'none'))
             headers.Authorization = `Bearer ${model.apiKey}`;
         for (const [key, value] of Object.entries(model.customHeaders || {})) {
             if (/^(host|content-length|connection|transfer-encoding)$/i.test(key))
@@ -375,6 +410,7 @@ function createModelManager(directory, codec, openExternal, dependencies = { log
         const listUrl = new URL(modelListUrl(model.apiUrl, format, model.provider));
         const models = new Map();
         const cursors = new Set();
+        const workersPages = new Set();
         const deadline = Date.now() + 30000;
         let received = 0;
         for (let page = 1; page <= 50; page++) {
@@ -382,13 +418,41 @@ function createModelManager(directory, codec, openExternal, dependencies = { log
                 throw new Error('Model discovery exceeded its 30-second time budget');
             const response = await requestJson(listUrl.toString(), headers, model.allowUnauthorized);
             if (response.status < 200 || response.status >= 300)
-                throw Object.assign(new Error(statusError(response.status)), { status: response.status });
-            for (const found of parseModels(response.data, model.provider))
+                throw Object.assign(new Error(statusError(response.status, workersAi)), { status: response.status });
+            for (const found of parseModels(response.data, workersAi ? 'workers-ai' : model.provider))
                 models.set(found.id, found);
             if (models.size > 10000)
                 throw new Error('Model catalog exceeds 10000 entries');
             const data = response.data;
-            if (model.provider === 'dashscope' && Array.isArray(data.output?.models)) {
+            if (workersAi) {
+                const catalog = response.data;
+                const items = catalog.result || catalog.data;
+                const info = catalog.result_info;
+                if (info &&
+                    Object.values(info).some((value) => typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0))
+                    throw new Error('Cloudflare returned invalid model pagination');
+                if (info?.page !== undefined && info.page !== page)
+                    throw new Error('Cloudflare returned an unexpected model page');
+                const signature = JSON.stringify(items);
+                if (items.length && workersPages.has(signature))
+                    throw new Error('Cloudflare repeated a model catalog page');
+                workersPages.add(signature);
+                received += items.length;
+                if (received > 10000)
+                    throw new Error('Model catalog exceeds 10000 entries');
+                const hasMore = info?.total_count !== undefined
+                    ? received < info.total_count
+                    : info?.total_pages !== undefined
+                        ? page < info.total_pages
+                        : items.length >= (info?.per_page || 100);
+                if (hasMore) {
+                    if (!items.length)
+                        throw new Error('Cloudflare returned an incomplete model catalog');
+                    listUrl.searchParams.set('page', String(page + 1));
+                    continue;
+                }
+            }
+            else if (model.provider === 'dashscope' && Array.isArray(data.output?.models)) {
                 received += data.output.models.length;
                 const total = data.output.total;
                 if (typeof total === 'number' && Number.isSafeInteger(total) && total >= 0 && received < total) {

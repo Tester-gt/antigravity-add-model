@@ -114,6 +114,9 @@ function validateCustomModel(model) {
         if (url.username || url.password) {
             return { valid: false, error: 'Use the API key or custom headers field instead of embedding credentials in the API URL' };
         }
+        if ((0, providers_1.workersAiAccountPath)(apiUrl, provider) && m.apiFormat !== undefined && m.apiFormat !== 'openai') {
+            return { valid: false, error: 'Cloudflare Workers AI requires the OpenAI compatible API format' };
+        }
     }
     catch (e) {
         return { valid: false, error: `Invalid API URL: ${e.message}` };

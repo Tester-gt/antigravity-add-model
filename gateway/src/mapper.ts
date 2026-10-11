@@ -229,9 +229,19 @@ function mapSchema(schema: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+const INTEGER_CONSTRAINTS = ['minLength', 'maxLength', 'minItems', 'maxItems', 'minProperties', 'maxProperties', 'minContains', 'maxContains'];
+
 function normalizeSchemaTypes(schema: unknown): void {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return;
   const node = schema as Record<string, unknown>;
+  // Gemini/protobuf encodes int64 constraints as decimal strings. Only convert
+  // exact safe integers at schema nodes; defaults/examples remain user data.
+  for (const key of INTEGER_CONSTRAINTS) {
+    const value = node[key];
+    if (typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value))) {
+      node[key] = Number(value);
+    }
+  }
   if (typeof node.type === 'string') {
     node.type = TYPE_MAP[node.type] || node.type;
   } else if (Array.isArray(node.type)) {

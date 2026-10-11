@@ -1370,6 +1370,12 @@ function renderProviderSettings() {
     input.dataset.envKey = meta.baseUrlEnv;
     input.addEventListener('input', () => { input.dataset.dirty = 'true'; });
     card.append(label, input);
+    if (id === 'workers-ai') {
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = 'Enter a Workers AI API token and replace ACCOUNT_ID in the base URL with your Cloudflare account ID. Save before browsing models. Model capabilities vary; select a tool-capable model for Agent mode.';
+      card.appendChild(hint);
+    }
     container.appendChild(card);
   }
 }

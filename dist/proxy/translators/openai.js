@@ -57,15 +57,7 @@ function mapGeminiToolsToOpenAI(geminiTools) {
         if (toolGroup.functionDeclarations && Array.isArray(toolGroup.functionDeclarations)) {
             for (const func of toolGroup.functionDeclarations) {
                 const declaration = func.parametersJsonSchema ?? func.parameters;
-                const params = declaration
-                    ? JSON.parse(JSON.stringify(declaration))
-                    : { type: 'object', properties: {} };
-                if (params.type && typeof params.type === 'string') {
-                    params.type = params.type.toLowerCase();
-                }
-                if (params.properties) {
-                    (0, utils_1.fixParamTypes)(params.properties);
-                }
+                const params = (0, utils_1.normalizeToolSchema)(declaration ?? { type: 'object', properties: {} });
                 openaiTools.push({
                     type: 'function',
                     function: {

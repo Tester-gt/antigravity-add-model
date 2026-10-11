@@ -23,6 +23,13 @@ const presets = [
   { id: 'openai', label: 'OpenAI', defaultUrl: 'https://provider.example/v1', apiFormat: 'openai', keyRequired: true },
   { id: 'ollama', label: 'Ollama', defaultUrl: 'http://127.0.0.1:11434/v1', apiFormat: 'openai', keyRequired: false },
   {
+    id: 'workers-ai',
+    label: 'Cloudflare Workers AI',
+    defaultUrl: 'https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1/chat/completions',
+    apiFormat: 'openai',
+    keyRequired: true,
+  },
+  {
     id: 'google-cloudcode',
     label: 'Google Cloud Code accounts',
     defaultUrl: 'https://daily-cloudcode-pa.googleapis.com',
@@ -171,6 +178,78 @@ describe('custom model settings in the preserved vendor preload', () => {
     await vi.waitFor(() => expect(f.document.querySelector('#new-settings #agy-custom-models-section')).toBeTruthy());
     expect(f.document.querySelectorAll('#agy-custom-models-section')).toHaveLength(1);
     expect(f.document.querySelectorAll('#agy-manager-style')).toHaveLength(1);
+  });
+
+  it('guides Cloudflare account setup and blocks test, discovery, and save until the URL is complete', async () => {
+    const f = await fixture();
+    await f.click('Add model');
+    f.input('agy-provider', 'workers-ai').dispatchEvent(new f.dom.window.Event('change'));
+    expect(f.input('agy-api-url').value).toContain('/accounts/ACCOUNT_ID/');
+    const hint = [...f.document.querySelectorAll('p')].find((node) => node.textContent?.startsWith('Cloudflare:'))!;
+    expect(hint.hidden).toBe(false);
+    expect(hint.textContent).toContain('Workers AI API token template');
+    f.input('agy-api-key', 'private-token');
+    f.input('agy-model-id', '@cf/text-model');
+    await f.click('Test connection');
+    await f.click('Fetch provider models');
+    await f.click('Save model');
+    expect(f.document.querySelector('[role="dialog"]')!.textContent).toContain('32-character Account ID');
+    expect(
+      f.invoke.mock.calls.some(([channel]) =>
+        ['storage:test-model-connection', 'storage:discover-models', 'storage:save-custom-model'].includes(channel),
+      ),
+    ).toBe(false);
+    f.input(
+      'agy-api-url',
+      'https://api.cloudflare.com/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1/chat/completions',
+    );
+    await f.click('Test connection');
+    expect(f.document.querySelector('[role="dialog"]')!.textContent).toContain('Generation was not tested');
+    await f.click('Save model');
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:save-custom-model',
+      expect.objectContaining({
+        provider: 'workers-ai',
+        apiFormat: 'openai',
+        externalModelName: '@cf/text-model',
+        apiKey: 'private-token',
+      }),
+    );
+  });
+
+  it.each([
+    ['custom', { aUtHoRiZaTiOn: '********' }],
+    ['custom', { 'X-Auth-Key': '********', 'X-Auth-Email': '********' }],
+    ['workers-ai', { Authorization: '********' }],
+    ['workers-ai', { 'X-Auth-Key': '********', 'X-Auth-Email': '********' }],
+  ])('preserves existing Cloudflare header authentication for %s profiles', async (provider, customHeaders) => {
+    const existing = {
+      ...model,
+      provider,
+      apiKey: 'none',
+      apiUrl: 'https://api.cloudflare.com/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1/chat/completions',
+      customHeaders,
+      externalModelName: '@cf/text-model',
+    };
+    const f = await fixture(undefined, [existing]);
+    await f.click('Edit');
+    expect(f.input('agy-api-key').value).toBe('');
+    await f.click('Test connection');
+    await f.click('Fetch provider models');
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:test-model-connection',
+      expect.objectContaining({ provider, apiKey: 'none', customHeaders }),
+    );
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:discover-models',
+      expect.objectContaining({ provider, apiKey: 'none', customHeaders }),
+    );
+    await f.click('Save model');
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:save-custom-model',
+      expect.objectContaining({ provider, apiKey: 'none', customHeaders }),
+    );
+    expect(f.document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('edits and renames while roundtripping masked credentials and advanced options', async () => {

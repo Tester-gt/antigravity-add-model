@@ -11,7 +11,7 @@
  * and preventing cryptic UI errors.
  */
 
-import { PROVIDERS } from './providers';
+import { PROVIDERS, workersAiAccountPath } from './providers';
 
 interface ValidationResult {
   valid: boolean;
@@ -117,6 +117,9 @@ export function validateCustomModel(model: unknown): ValidationResult {
     }
     if (url.username || url.password) {
       return { valid: false, error: 'Use the API key or custom headers field instead of embedding credentials in the API URL' };
+    }
+    if (workersAiAccountPath(apiUrl, provider) && m.apiFormat !== undefined && m.apiFormat !== 'openai') {
+      return { valid: false, error: 'Cloudflare Workers AI requires the OpenAI compatible API format' };
     }
   } catch (e) {
     return { valid: false, error: `Invalid API URL: ${(e as Error).message}` };

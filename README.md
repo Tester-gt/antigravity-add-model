@@ -44,7 +44,7 @@ Add external API providers and local models alongside Antigravity's built-in mod
 | Capability | Included |
 | --- | --- |
 | **Manage models** | Provider groups, search, edit, duplicate, enable/disable, and model discovery. |
-| **Connect your providers** | OpenAI, Anthropic, Gemini, OpenRouter, and other compatible APIs; local services such as Ollama, LM Studio, and vLLM. |
+| **Connect your providers** | OpenAI, Anthropic, Gemini, OpenRouter, [Cloudflare Workers AI](docs/providers.md#cloudflare-workers-ai), and other compatible APIs; local services such as Ollama, LM Studio, and vLLM. |
 | **Tune requests** | Protocol selection, reasoning settings, context/output limits, custom headers, timeouts, retries, fallbacks, and circuit breakers. |
 | **Use Google account pools** | Explicit OAuth sign-in with your own client, encrypted account storage, token refresh, quota checks, and account selection. |
 | **Share configuration** | Validated JSON/base64 import and exports that omit stored credentials. |

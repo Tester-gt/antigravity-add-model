@@ -201,6 +201,47 @@ describe('mapContentsToMessages', () => {
 });
 
 describe('mapTools', () => {
+  for (const field of ['parameters', 'parametersJsonSchema']) {
+    it(`normalizes protobuf integer constraints only in schema positions (${field})`, () => {
+      const literal = { type: 'STRING', minLength: '1' };
+      const schema = {
+        type: 'OBJECT', minProperties: '0', maxProperties: '8',
+        properties: {
+          path: { type: 'STRING', minLength: '1', maxLength: '4096', default: literal, enum: [literal], examples: [literal], const: literal },
+          list: { type: 'ARRAY', minItems: '0', maxItems: '9', minContains: '1', maxContains: '2', contains: { type: 'STRING', minLength: '2' } },
+          minLength: { type: 'STRING', minLength: '1' },
+        },
+        $defs: { value: { type: 'STRING', minLength: '3' } },
+        allOf: [{ properties: { text: { minLength: '4' } } }],
+        additionalProperties: { type: 'STRING', maxLength: '5' },
+        'x-metadata': literal,
+      };
+      const before = structuredClone(schema);
+      const result = mapTools([{ functionDeclarations: [{ name: 'lookup', [field]: schema }] }] as any)!.lookup.parameters as any;
+      assert.equal(result.minProperties, 0);
+      assert.equal(result.maxProperties, 8);
+      assert.equal(result.properties.path.minLength, 1);
+      assert.equal(result.properties.path.maxLength, 4096);
+      assert.equal(result.properties.minLength.minLength, 1);
+      assert.deepEqual([result.properties.list.minItems, result.properties.list.maxItems, result.properties.list.minContains, result.properties.list.maxContains], [0, 9, 1, 2]);
+      assert.equal(result.properties.list.contains.minLength, 2);
+      assert.equal(result.$defs.value.minLength, 3);
+      assert.equal(result.allOf[0].properties.text.minLength, 4);
+      assert.equal(result.additionalProperties.maxLength, 5);
+      for (const key of ['default', 'const']) assert.deepEqual(result.properties.path[key], literal);
+      for (const key of ['enum', 'examples']) assert.deepEqual(result.properties.path[key], [literal]);
+      assert.deepEqual(result['x-metadata'], literal);
+      assert.deepEqual(schema, before);
+    });
+  }
+
+  it('keeps malformed or unsafe integer constraint strings unchanged for validation', () => {
+    for (const value of ['', ' 1', '+1', '-1', '1.5', '01', '1e2', '9007199254740992']) {
+      const schema = { type: 'STRING', minLength: value };
+      assert.equal(mapTools([{ functionDeclarations: [{ name: 'test', parameters: schema }] }] as any)!.test.parameters!.minLength, value);
+    }
+  });
+
   it('should convert Gemini tools to OpenAI format', () => {
     const tools = [
       {
