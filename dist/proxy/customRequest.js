@@ -357,16 +357,22 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                             dataLines = [];
                             if (!data)
                                 return;
+                            let chunk;
                             if (data.trim() === '[DONE]') {
                                 terminal = true;
-                                return;
+                                // Some compatible endpoints omit finish_reason. Flush remaining
+                                // text/tools through validation, but never replay a finalized context.
+                                if (format !== 'openai' || !shared_1.activeStreamContexts.has(stateKey))
+                                    return;
+                                chunk = { choices: [{ delta: {}, finish_reason: 'stop' }] };
                             }
-                            let chunk;
-                            try {
-                                chunk = JSON.parse(data);
-                            }
-                            catch {
-                                throw new UpstreamError('Upstream sent malformed SSE JSON.');
+                            else {
+                                try {
+                                    chunk = JSON.parse(data);
+                                }
+                                catch {
+                                    throw new UpstreamError('Upstream sent malformed SSE JSON.');
+                                }
                             }
                             if (chunk.error || chunk.type === 'error')
                                 throw new UpstreamError('Upstream reported a stream error.');
@@ -389,8 +395,18 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                                 terminal = true;
                             if ((chunk.type === 'message_delta' && chunk.delta?.stop_reason === 'tool_use') ||
                                 chunk.choices?.[0]?.finish_reason) {
-                                for (const tool of Object.values(shared_1.activeStreamContexts.get(stateKey)?.toolCalls || {}))
-                                    validateToolArguments(tool.arguments);
+                                const pending = shared_1.activeStreamContexts.get(stateKey)?.toolCalls || {};
+                                // Validate a copy including this event before the translator appends
+                                // its fragments and consumes the state. Never append to live state twice.
+                                const completed = new Map(Object.entries(pending).map(([index, tool]) => [index, tool.arguments]));
+                                if (format === 'openai' && Array.isArray(delta?.tool_calls)) {
+                                    for (const tool of delta.tool_calls) {
+                                        const index = String(tool.index ?? 0);
+                                        completed.set(index, (completed.get(index) || '') + (tool.function?.arguments || ''));
+                                    }
+                                }
+                                for (const args of completed.values())
+                                    validateToolArguments(args);
                             }
                             const mapped = registry.translateStreamChunk(model.provider, chunk, stateKey, format, stateKey, toolSchemas);
                             if (mapped) {

@@ -358,15 +358,19 @@ export async function runCustomModelRequest(
               const data = dataLines.join('\n');
               dataLines = [];
               if (!data) return;
+              let chunk: Record<string, any>;
               if (data.trim() === '[DONE]') {
                 terminal = true;
-                return;
-              }
-              let chunk: Record<string, any>;
-              try {
-                chunk = JSON.parse(data);
-              } catch {
-                throw new UpstreamError('Upstream sent malformed SSE JSON.');
+                // Some compatible endpoints omit finish_reason. Flush remaining
+                // text/tools through validation, but never replay a finalized context.
+                if (format !== 'openai' || !activeStreamContexts.has(stateKey)) return;
+                chunk = { choices: [{ delta: {}, finish_reason: 'stop' }] };
+              } else {
+                try {
+                  chunk = JSON.parse(data);
+                } catch {
+                  throw new UpstreamError('Upstream sent malformed SSE JSON.');
+                }
               }
               if (chunk.error || chunk.type === 'error') throw new UpstreamError('Upstream reported a stream error.');
               if (cloudCode && chunk.response) chunk = chunk.response;
@@ -393,8 +397,17 @@ export async function runCustomModelRequest(
                 (chunk.type === 'message_delta' && chunk.delta?.stop_reason === 'tool_use') ||
                 chunk.choices?.[0]?.finish_reason
               ) {
-                for (const tool of Object.values(activeStreamContexts.get(stateKey)?.toolCalls || {}))
-                  validateToolArguments(tool.arguments);
+                const pending = activeStreamContexts.get(stateKey)?.toolCalls || {};
+                // Validate a copy including this event before the translator appends
+                // its fragments and consumes the state. Never append to live state twice.
+                const completed = new Map(Object.entries(pending).map(([index, tool]) => [index, tool.arguments]));
+                if (format === 'openai' && Array.isArray(delta?.tool_calls)) {
+                  for (const tool of delta.tool_calls) {
+                    const index = String(tool.index ?? 0);
+                    completed.set(index, (completed.get(index) || '') + (tool.function?.arguments || ''));
+                  }
+                }
+                for (const args of completed.values()) validateToolArguments(args);
               }
               const mapped = registry.translateStreamChunk(
                 model.provider,

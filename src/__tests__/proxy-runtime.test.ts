@@ -156,6 +156,282 @@ async function readToolCalls(response: Response, stream: boolean) {
 }
 
 describe('real upstream HTTP routing', () => {
+  describe('terminal OpenAI tool frames', () => {
+    it.each([
+      { name: 'ordinary less-than sign', content: '2 <', text: '2 <', calls: [] },
+      { name: 'ordinary partial marker', content: 'Literal <DS', text: 'Literal <DS', calls: [] },
+      {
+        name: 'DSML call',
+        content:
+          '<DSML|invoke name="lookup"><DSML|parameter name="value" string="true">result</DSML|parameter></DSML|invoke>',
+        text: '',
+        calls: [{ name: 'lookup', args: { value: 'result' } }],
+      },
+    ])('flushes $name when only [DONE] signals completion', async ({ content, text, calls }) => {
+      const upstream = await serve((_req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        sse(res, { choices: [{ delta: { content } }] });
+        sse(res, '[DONE]');
+        sse(res, '[DONE]');
+        res.end();
+      });
+      const response = await fetch(await proxy([model(upstream)], true));
+      expect(response.status).toBe(200);
+      const wire = await response.clone().text();
+      const candidates = wire
+        .split('\n')
+        .filter((line) => line.startsWith('data: '))
+        .flatMap((line) => JSON.parse(line.slice(6)).candidates || []);
+      const rendered = candidates
+        .flatMap((candidate: { content: { parts: { text?: string }[] } }) => candidate.content.parts)
+        .map((part: { text?: string }) => part.text || '')
+        .join('');
+      expect(rendered).toBe(text);
+      expect(wire.match(/"finishReason":"STOP"/g)).toHaveLength(1);
+      expect(await readToolCalls(response, true)).toEqual(calls);
+    });
+
+    it.each(['{"value":"result"}', '{"value":'])('validates pending arguments %s before [DONE] flush', async (args) => {
+      const upstream = await serve((_req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        sse(res, {
+          choices: [
+            { delta: { tool_calls: [{ index: 0, id: 'done-call', function: { name: 'lookup', arguments: args } }] } },
+          ],
+        });
+        sse(res, '[DONE]');
+        res.end();
+      });
+      const response = await fetch(await proxy([model(upstream)], true));
+      if (args.endsWith('}')) {
+        expect(response.status).toBe(200);
+        expect(await readToolCalls(response, true)).toEqual([
+          { id: 'done-call', name: 'lookup', args: { value: 'result' } },
+        ]);
+      } else {
+        expect(response.status).toBe(502);
+        expect(await response.text()).toContain('incomplete tool arguments');
+      }
+    });
+
+    it.each([
+      { finish: 'tool_calls', indices: [0] },
+      { finish: 'tool_calls', indices: [7, 2] },
+      { finish: 'stop', indices: [4] },
+    ])('completes final fragments once for $finish with indices $indices', async ({ finish, indices }) => {
+      const upstream = await serve((_req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: indices.map((index) => ({
+                  index,
+                  id: `call-${index}`,
+                  function: { name: 'lookup', arguments: '{"value":' },
+                })),
+              },
+            },
+          ],
+        });
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: [...indices].reverse().map((index) => ({
+                  index,
+                  function: { arguments: JSON.stringify(`result-${index}`) + '}' },
+                })),
+              },
+              finish_reason: finish,
+            },
+          ],
+        });
+        sse(res, '[DONE]');
+        res.end();
+      });
+      const response = await fetch(await proxy([model(upstream)], true));
+      expect(response.status).toBe(200);
+      const calls = await readToolCalls(response, true);
+      expect(calls).toHaveLength(indices.length);
+      expect(calls).toEqual(
+        expect.arrayContaining(
+          indices.map((index) => ({
+            id: `call-${index}`,
+            name: 'lookup',
+            args: { value: `result-${index}` },
+          })),
+        ),
+      );
+    });
+
+    it('combines repeated final fragments and a new whole call in the same frame', async () => {
+      const upstream = await serve((_req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 4,
+                    id: 'existing',
+                    function: { name: 'lookup', arguments: '{"value":' },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 9, id: 'new', function: { name: 'lookup', arguments: '{"value":"new"}' } },
+                  { index: 4, function: { arguments: '"old"' } },
+                  { index: 4, function: { arguments: '}' } },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        });
+        sse(res, '[DONE]');
+        res.end();
+      });
+      const response = await fetch(await proxy([model(upstream)], true));
+      expect(response.status).toBe(200);
+      expect(await readToolCalls(response, true)).toEqual([
+        { id: 'existing', name: 'lookup', args: { value: 'old' } },
+        { id: 'new', name: 'lookup', args: { value: 'new' } },
+      ]);
+    });
+
+    it('preserves reasoning, text and the completed call from one terminal event', async () => {
+      const upstream = await serve((_req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'reasoned-call',
+                    function: { name: 'lookup', arguments: '{"value":' },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                reasoning_content: 'Ready to look up the value.',
+                content: 'Checking now.',
+                tool_calls: [{ index: 0, function: { arguments: '"result"}' } }],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        });
+        sse(res, '[DONE]');
+        res.end();
+      });
+      const response = await fetch(await proxy([model(upstream)], true));
+      const text = await response.clone().text();
+      expect(response.status).toBe(200);
+      expect(text).toContain('"text":"Ready to look up the value.","thought":true');
+      expect(text).toContain('"text":"Checking now."');
+      expect(text).not.toContain('TOOL_CALL');
+      expect(text.match(/"finishReason":"STOP"/g)).toHaveLength(1);
+      expect(await readToolCalls(response, true)).toEqual([
+        { id: 'reasoned-call', name: 'lookup', args: { value: 'result' } },
+      ]);
+    });
+
+    it.each(['{"value":}', 'null', '[]', '"scalar"'])(
+      'rejects terminal-only invalid arguments %s before emitting any call',
+      async (invalid) => {
+        let requests = 0;
+        let fallbacks = 0;
+        const upstream = await serve((_req, res) => {
+          requests++;
+          res.setHeader('Content-Type', 'text/event-stream');
+          sse(res, { choices: [{ delta: { content: 'Checking.' } }] });
+          sse(res, {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: 'valid', function: { name: 'lookup', arguments: '{"value":"valid"}' } },
+                    { index: 1, id: 'invalid', function: { name: 'lookup', arguments: invalid } },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+          });
+          sse(res, '[DONE]');
+          res.end();
+        });
+        const fallback = model(
+          await serve((_req, res) => {
+            fallbacks++;
+            success(res);
+          }),
+        );
+        const configured = model(upstream, { maxRetries: 2, fallbackModels: [fallback.name] });
+        const text = await (await fetch(await proxy([configured, fallback], true))).text();
+        expect(text).toContain('event: error');
+        expect(text).not.toContain('"functionCall"');
+        expect(requests).toBe(1);
+        expect(fallbacks).toBe(0);
+      },
+    );
+
+    it('rejects an invalid terminal-only tool stream without retrying or falling back', async () => {
+      let requests = 0;
+      let fallbacks = 0;
+      const upstream = await serve((_req, res) => {
+        requests++;
+        res.setHeader('Content-Type', 'text/event-stream');
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    function: { name: 'lookup', arguments: '{"value":}' },
+                    id: 'invalid',
+                  },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        });
+        sse(res, '[DONE]');
+        res.end();
+      });
+      const fallback = model(
+        await serve((_req, res) => {
+          fallbacks++;
+          success(res);
+        }),
+      );
+      const configured = model(upstream, { maxRetries: 2, fallbackModels: [fallback.name] });
+      const response = await fetch(await proxy([configured, fallback], true));
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain('"functionCall"');
+      expect(requests).toBe(1);
+      expect(fallbacks).toBe(0);
+    });
+  });
+
   it.each([400, 422])(
     'explains an upstream HTTP %i tool-schema rejection without exposing its body',
     async (status) => {

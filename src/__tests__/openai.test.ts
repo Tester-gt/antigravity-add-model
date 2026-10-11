@@ -336,7 +336,7 @@ describe('mapOpenAIToGemini', () => {
       { text: explanation },
       { functionCall: { name: 'write_to_file', args, id: 'retry-write' } },
     ]);
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
   });
 
   it('keeps valid write_to_file arguments within the schema sent to the provider', () => {
@@ -440,7 +440,7 @@ describe('mapOpenAIToGemini', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'gpt-4o');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     expect(result.candidates[0].content.parts[0].functionCall).toBeDefined();
     expect(result.candidates[0].content.parts[0].functionCall!.name).toBe('search');
   });
@@ -459,7 +459,7 @@ describe('mapOpenAIToGemini', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fcParts.length).toBeGreaterThan(0);
   });
@@ -540,7 +540,7 @@ describe('mapOpenAIChunkToGemini', () => {
         streamKey,
         schemas,
       );
-      expect(result?.finishReason).toBe('TOOL_CALL');
+      expect(result?.finishReason).toBe('STOP');
       expect(result?.content.parts).toEqual([{ functionCall: { name, args, id: 'fragmented-call' } }]);
       expect(shared.activeStreamContexts.has(streamKey)).toBe(false);
     });
@@ -597,7 +597,7 @@ describe('mapOpenAIChunkToGemini', () => {
       'gpt-4o',
     );
     expect(result).not.toBeNull();
-    expect(result!.finishReason).toBe('TOOL_CALL');
+    expect(result!.finishReason).toBe('STOP');
   });
 
   it('should handle stop finish with pending tool calls', () => {
@@ -643,16 +643,124 @@ describe('mapOpenAIChunkToGemini', () => {
     expect(result).toBeNull();
   });
 
-  it('should detect DSML tool calls in accumulated streaming text', () => {
+  it('emits DSML calls only after the upstream finishes', () => {
     const dsmlText =
       'Result:\n<DSML|invoke name="run_command">\n<DSML|parameter name="CommandLine" string="true">ls</DSML|parameter>\n</DSML|invoke>';
     const chunk = {
       id: 'stream_dsml',
       choices: [{ delta: { content: dsmlText }, index: 0 }],
     };
-    const result = mapOpenAIChunkToGemini(chunk, 'deepseek-v4');
-    expect(result).not.toBeNull();
-    const fcParts = result!.content.parts.filter((p) => p.functionCall);
-    expect(fcParts.length).toBeGreaterThan(0);
+    expect(mapOpenAIChunkToGemini(chunk, 'deepseek-v4', 'stream_dsml', new Map())?.content.parts).toEqual([
+      { text: 'Result:\n' },
+    ]);
+    const result = mapOpenAIChunkToGemini(
+      { id: 'stream_dsml', choices: [{ delta: {}, finish_reason: 'stop' }] },
+      'deepseek-v4',
+      'stream_dsml',
+      new Map(),
+    );
+    expect(result?.finishReason).toBe('STOP');
+    expect(result?.content.parts).toEqual([{ functionCall: { name: 'run_command', args: { CommandLine: 'ls' } } }]);
+    expect(shared.activeStreamContexts.has('stream_dsml')).toBe(false);
+  });
+
+  it.each(['stop', 'tool_calls'])('retains split parallel DSML calls until terminal %s', (finishReason) => {
+    const streamKey = `parallel-dsml-${finishReason}`;
+    const first =
+      '<DSML|tool_calls><DSML|invoke name="first"><DSML|parameter name="x" string="true">1</DSML|parameter></DSML|invoke><DSML|invoke name="second"><DSML|parameter name="y" string="true">';
+    const second = '2</DSML|parameter></DSML|invoke></DSML|tool_calls>';
+    expect(
+      mapOpenAIChunkToGemini({ choices: [{ delta: { content: first } }] }, 'test', streamKey, new Map()),
+    ).toBeNull();
+    expect(
+      mapOpenAIChunkToGemini({ choices: [{ delta: { content: second } }] }, 'test', streamKey, new Map()),
+    ).toBeNull();
+    const result = mapOpenAIChunkToGemini(
+      { choices: [{ delta: {}, finish_reason: finishReason }] },
+      'test',
+      streamKey,
+      new Map(),
+    );
+    expect(result?.finishReason).toBe('STOP');
+    expect(result?.content.parts).toEqual([
+      { functionCall: { name: 'first', args: { x: '1' } } },
+      { functionCall: { name: 'second', args: { y: '2' } } },
+    ]);
+    expect(shared.activeStreamContexts.has(streamKey)).toBe(false);
+  });
+
+  it('buffers a split DSML marker without duplicating earlier text', () => {
+    const key = 'partial-marker';
+    expect(
+      mapOpenAIChunkToGemini({ choices: [{ delta: { content: 'Checking now. ' } }] }, 'test', key)?.content.parts,
+    ).toEqual([{ text: 'Checking now. ' }]);
+    expect(mapOpenAIChunkToGemini({ choices: [{ delta: { content: '<DS' } }] }, 'test', key)).toBeNull();
+    expect(
+      mapOpenAIChunkToGemini({ choices: [{ delta: { content: 'ML|invoke name="lookup">' } }] }, 'test', key),
+    ).toBeNull();
+    const result = mapOpenAIChunkToGemini(
+      { choices: [{ delta: { content: '</DSML|invoke>' }, finish_reason: 'stop' }] },
+      'test',
+      key,
+      new Map(),
+    );
+    expect(result?.content.parts).toEqual([{ functionCall: { name: 'lookup', args: {} } }]);
+    expect(result?.finishReason).toBe('STOP');
+  });
+
+  it.each(['reasoning_content', 'reasoning'])(
+    'preserves terminal %s and completed tool arguments in one candidate',
+    (field) => {
+      const key = `terminal-${field}`;
+      mapOpenAIChunkToGemini(
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: 'terminal-reasoning-call', function: { name: 'lookup', arguments: '{"x":' } },
+                ],
+              },
+            },
+          ],
+        },
+        'test',
+        key,
+        new Map(),
+      );
+      const result = mapOpenAIChunkToGemini(
+        {
+          choices: [
+            {
+              delta: { [field]: 'The tool is ready.', tool_calls: [{ index: 0, function: { arguments: '1}' } }] },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        },
+        'test',
+        key,
+        new Map(),
+      );
+      expect(result?.finishReason).toBe('STOP');
+      expect(result?.content.parts).toEqual([
+        { text: 'The tool is ready.', thought: true },
+        { functionCall: { name: 'lookup', args: { x: 1 }, id: 'terminal-reasoning-call' } },
+      ]);
+      expect(shared.activeStreamContexts.has(key)).toBe(false);
+    },
+  );
+
+  it('flushes a possible DSML marker that turns out to be ordinary text', () => {
+    const key = 'ordinary-marker-prefix';
+    expect(mapOpenAIChunkToGemini({ choices: [{ delta: { content: 'Use <' } }] }, 'test', key)?.content.parts).toEqual([
+      { text: 'Use ' },
+    ]);
+    expect(
+      mapOpenAIChunkToGemini({ choices: [{ delta: { content: 'div> elements' } }] }, 'test', key)?.content.parts,
+    ).toEqual([{ text: '<div> elements' }]);
+    expect(
+      mapOpenAIChunkToGemini({ choices: [{ delta: { content: ' <DS' }, finish_reason: 'stop' }] }, 'test', key)?.content
+        .parts,
+    ).toEqual([{ text: ' <DS' }]);
   });
 });

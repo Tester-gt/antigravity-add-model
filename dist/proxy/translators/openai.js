@@ -326,7 +326,7 @@ function mapOpenAIToGemini(openAiRes, modelName, toolSchemas) {
         if (choice.message.content)
             parts.unshift({ text: choice.message.content });
         return {
-            candidates: [{ content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 }],
+            candidates: [{ content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 }],
             usageMetadata: {
                 promptTokenCount: openAiRes.usage?.prompt_tokens || 0,
                 candidatesTokenCount: openAiRes.usage?.completion_tokens || 0,
@@ -345,7 +345,7 @@ function mapOpenAIToGemini(openAiRes, modelName, toolSchemas) {
         if (dsml.cleanText)
             parts.unshift({ text: dsml.cleanText });
         return {
-            candidates: [{ content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 }],
+            candidates: [{ content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 }],
             usageMetadata: {
                 promptTokenCount: openAiRes.usage?.prompt_tokens || 0,
                 candidatesTokenCount: openAiRes.usage?.completion_tokens || 0,
@@ -370,6 +370,29 @@ function mapOpenAIToGemini(openAiRes, modelName, toolSchemas) {
     };
 }
 // ─── STREAM CHUNK: OpenAI → Gemini ────────────────────────────────────────
+// Track emitted prose without changing shared stream state. Context cleanup also
+// releases the cursor; a possible DSML prefix is held until its meaning is known.
+const streamedTextPositions = new WeakMap();
+function takeStreamText(context, terminal = false) {
+    const start = streamedTextPositions.get(context) || 0;
+    let end = context.accumulatedText.length;
+    if (!terminal) {
+        const marker = '<DSML|';
+        const index = context.accumulatedText.indexOf(marker, start);
+        if (index >= 0)
+            end = index;
+        else {
+            for (let length = marker.length - 1; length > 0; length--) {
+                if (context.accumulatedText.endsWith(marker.slice(0, length))) {
+                    end -= length;
+                    break;
+                }
+            }
+        }
+    }
+    streamedTextPositions.set(context, end);
+    return context.accumulatedText.slice(start, end);
+}
 function mapOpenAIChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
     const choice = chunk.choices?.[0];
     if (!choice)
@@ -394,25 +417,45 @@ function mapOpenAIChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
                 context.toolCalls[idx].arguments += tc.function.arguments;
         }
     }
-    let text = delta?.content || '';
+    const finishReason = choice.finish_reason;
+    const completed = finishReason === 'stop' || finishReason === 'length' || finishReason === 'tool_calls';
+    if (delta?.content)
+        context.accumulatedText += delta.content;
     const reasoning = delta?.reasoning_content || delta?.reasoning || '';
     if (reasoning) {
         context.accumulatedReasoning += reasoning;
-        return { content: { parts: [{ text: reasoning, thought: true }], role: 'model' }, finishReason: 'OTHER', index: 0 };
+        if (!completed)
+            return {
+                content: { parts: [{ text: reasoning, thought: true }], role: 'model' },
+                finishReason: 'OTHER',
+                index: 0,
+            };
     }
-    if (text)
-        context.accumulatedText += text;
-    const dsml = parseDSMLToolCalls(context.accumulatedText);
-    if (dsml && dsml.functionCalls.length > 0) {
-        const parts = dsml.functionCalls.map((fc) => {
-            const na = (0, utils_1.normalizeToolArgs)(fc.name, fc.args, toolSchemas);
-            const tr = (0, utils_1.translateToolCallToNative)(fc.name, na, toolSchemas);
-            return { functionCall: { name: tr.name, args: tr.args } };
-        });
-        context.accumulatedText = '';
-        return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
+    const completionParts = reasoning ? [{ text: reasoning, thought: true }] : [];
+    // A complete invoke can precede a fragmented parallel invoke. Keep both until
+    // the provider finishes, including providers that finish DSML with tool_calls.
+    if (completed && Object.keys(context.toolCalls).length === 0) {
+        const remaining = context.accumulatedText.slice(streamedTextPositions.get(context) || 0);
+        const dsml = parseDSMLToolCalls(remaining);
+        if (dsml && dsml.functionCalls.length > 0) {
+            if (dsml.cleanText)
+                completionParts.push({ text: dsml.cleanText });
+            for (const fc of dsml.functionCalls) {
+                const args = (0, utils_1.normalizeToolArgs)(fc.name, fc.args, toolSchemas);
+                const translated = (0, utils_1.translateToolCallToNative)(fc.name, args, toolSchemas);
+                completionParts.push({
+                    functionCall: { name: translated.name, args: translated.args },
+                });
+            }
+            shared_1.activeStreamContexts.delete(streamId);
+            return { content: { parts: completionParts, role: 'model' }, finishReason: 'STOP', index: 0 };
+        }
     }
-    const finishReason = choice.finish_reason;
+    if (completed) {
+        const text = takeStreamText(context, true);
+        if (text)
+            completionParts.push({ text });
+    }
     if (finishReason === 'stop' || finishReason === 'length') {
         // Check for pending native tool_calls before closing stream
         const pendingToolCalls = Object.values(context.toolCalls).filter((tc) => tc.name && tc.arguments);
@@ -443,25 +486,10 @@ function mapOpenAIChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
                 return { functionCall: { name: translated.name, args: translated.args, id: tc.id } };
             });
             shared_1.activeStreamContexts.delete(streamId);
-            return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
-        }
-        // Check for accumulated DSML tool calls
-        if (context.accumulatedText) {
-            const dsml2 = parseDSMLToolCalls(context.accumulatedText);
-            if (dsml2 && dsml2.functionCalls.length > 0) {
-                const parts = dsml2.functionCalls.map((fc) => {
-                    const na = (0, utils_1.normalizeToolArgs)(fc.name, fc.args, toolSchemas);
-                    const tr = (0, utils_1.translateToolCallToNative)(fc.name, na, toolSchemas);
-                    return { functionCall: { name: tr.name, args: tr.args } };
-                });
-                if (dsml2.cleanText)
-                    parts.unshift({ text: dsml2.cleanText });
-                shared_1.activeStreamContexts.delete(streamId);
-                return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
-            }
+            return { content: { parts: [...completionParts, ...parts], role: 'model' }, finishReason: 'STOP', index: 0 };
         }
         shared_1.activeStreamContexts.delete(streamId);
-        return { content: { parts: text ? [{ text }] : [], role: 'model' }, finishReason: 'STOP', index: 0 };
+        return { content: { parts: completionParts, role: 'model' }, finishReason: 'STOP', index: 0 };
     }
     // Only emit tool calls when finishReason signals completion (args are fully accumulated)
     if (finishReason === 'tool_calls') {
@@ -493,8 +521,9 @@ function mapOpenAIChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
             return { functionCall: { name: translated.name, args: translated.args, id: tc.id } };
         });
         shared_1.activeStreamContexts.delete(streamId);
-        return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
+        return { content: { parts: [...completionParts, ...parts], role: 'model' }, finishReason: 'STOP', index: 0 };
     }
+    const text = takeStreamText(context);
     if (text) {
         return { content: { parts: [{ text }], role: 'model' }, finishReason: 'OTHER', index: 0 };
     }

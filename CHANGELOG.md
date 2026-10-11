@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Complete streamed tool calls
+
+- Adapt the fix discussed in [PR #8](https://github.com/vahapogut/antigravity-add-model/pull/8): validate OpenAI tool arguments with the terminal event's final fragments before emitting any function calls. Valid single and parallel calls complete correctly, while malformed terminal-only calls are rejected without retrying or switching providers.
+- Use Gemini's `STOP` finish reason for completed OpenAI-compatible and Anthropic tool calls. Preserve calls when reasoning arrives in the terminal event, and wait for completion before emitting buffered DSML calls.
+- Flush pending text and validated calls when an OpenAI-compatible endpoint ends with `[DONE]` without a separate finish event. Add HTTP and translator regressions for fragmented arguments, mixed existing/new calls, invalid arguments, terminal reasoning, and DSML calls split across events.
+
 ### Unreleased — Cloudflare Workers AI and tool-schema bounds
 
 - Add a Cloudflare Workers AI preset to the desktop and optional gateway, with account-specific endpoints, API token configuration, and model discovery through Cloudflare's paginated model search API.

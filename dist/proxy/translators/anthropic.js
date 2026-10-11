@@ -253,7 +253,7 @@ function mapAnthropicToGemini(anthRes, modelName, toolSchemas) {
     if (functionCalls.length > 0) {
         return {
             candidates: [
-                { content: { parts: [...parts, ...functionCalls], role: 'model' }, finishReason: 'TOOL_CALL', index: 0 },
+                { content: { parts: [...parts, ...functionCalls], role: 'model' }, finishReason: 'STOP', index: 0 },
             ],
             usageMetadata: {
                 promptTokenCount: anthRes.usage?.input_tokens || 0,
@@ -345,7 +345,7 @@ function mapAnthropicChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
                 return { functionCall: { name: translated.name, args: translated.args, id: tc.id } };
             });
             shared_1.activeStreamContexts.delete(streamId);
-            return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
+            return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
         }
     }
     if (type === 'message_stop') {
