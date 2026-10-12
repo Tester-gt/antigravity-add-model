@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Vision model detection and image forwarding
+
+- Fix [issue #11](https://github.com/vahapogut/antigravity-add-model/issues/11): recognize DeepSeek-VL/VL2, Janus/Janus-Pro and supported Flash model names without excluding an entire provider family. Preserve explicit image-support overrides and read native provider `input_modalities` metadata.
+- Advertise image capabilities consistently across model-list response shapes and fallbacks. Forward actual image blocks to OpenAI-compatible and Anthropic-compatible endpoints instead of text placeholders, preserving multiple images, local binary files, public URLs and images alongside tool results.
+- Keep image files out of the proxy's UTF-8 text-file resolver. Estimate image context separately from base64 text size, and reject invalid image input without retries or fallback requests. Add translator, discovery, model-list and full desktop HTTP regressions; see [image input setup](docs/configuration.md#image-inputs).
+
 ### Unreleased — Complete streamed tool calls
 
 - Adapt the fix discussed in [PR #8](https://github.com/vahapogut/antigravity-add-model/pull/8): validate OpenAI tool arguments with the terminal event's final fragments before emitting any function calls. Valid single and parallel calls complete correctly, while malformed terminal-only calls are rejected without retrying or switching providers.

@@ -3,12 +3,44 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.trimContext = trimContext;
 exports.applyRequestOptions = applyRequestOptions;
 exports.parseRetryAfter = parseRetryAfter;
-/** Conservative estimate, not a tokenizer. Drop whole oldest turns, never half a tool exchange. */
+// A budgeting estimate, not a provider tokenizer. Image token costs depend on
+// the model and dimensions; base64 byte counts are not text token counts.
+const ESTIMATED_IMAGE_TOKENS = 1024;
+function estimateContextTokens(body) {
+    let imageTokens = 0;
+    const estimatedBody = {
+        ...body,
+        contents: body.contents?.map((content) => ({
+            ...content,
+            parts: content.parts?.map((part) => {
+                let estimatedPart = part;
+                for (const field of ['inlineData', 'fileData']) {
+                    const attachment = part[field];
+                    if (!attachment || typeof attachment !== 'object')
+                        continue;
+                    const isImage = (typeof attachment.mimeType === 'string' && /^image\//i.test(attachment.mimeType.trim())) ||
+                        (field === 'fileData' &&
+                            typeof attachment.fileUri === 'string' &&
+                            /^data:image\//i.test(attachment.fileUri));
+                    if (!isImage)
+                        continue;
+                    imageTokens += ESTIMATED_IMAGE_TOKENS;
+                    estimatedPart = {
+                        ...estimatedPart,
+                        [field]: { ...attachment, [field === 'inlineData' ? 'data' : 'fileUri']: '' },
+                    };
+                }
+                return estimatedPart;
+            }),
+        })),
+    };
+    return Math.ceil(Buffer.byteLength(JSON.stringify(estimatedBody), 'utf8') / 3) + imageTokens;
+}
+/** Approximate input budget. Drop whole oldest turns, never half a tool exchange. */
 function trimContext(body, contextWindow, maxOutputTokens = 0) {
     if (!contextWindow)
         return body;
     const budget = contextWindow - maxOutputTokens;
-    const estimate = (value) => Math.ceil(Buffer.byteLength(JSON.stringify(value), 'utf8') / 3);
     const groups = [];
     for (const content of body.contents || []) {
         const startsTurn = content.role !== 'model' && !content.parts?.some((part) => part.functionResponse);
@@ -17,11 +49,11 @@ function trimContext(body, contextWindow, maxOutputTokens = 0) {
         groups[groups.length - 1].push(content);
     }
     const result = { ...body, contents: groups.flat() };
-    while (estimate(result) > budget && groups.length > 1) {
+    while (estimateContextTokens(result) > budget && groups.length > 1) {
         groups.shift();
         result.contents = groups.flat();
     }
-    if (estimate(result) > budget)
+    if (estimateContextTokens(result) > budget)
         throw new Error('The latest turn, system instructions and tools exceed the configured contextWindow.');
     return result;
 }

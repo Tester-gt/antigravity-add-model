@@ -2,9 +2,10 @@
  * Anthropic provider translator.
  * Handles Gemini ↔ Anthropic request/response mapping and streaming SSE events.
  */
-import * as path from 'path';
+import { readFileSync } from 'fs';
 
 import log from 'electron-log';
+import { assertUserImageParts, getImageSource, ImageSource, localFilePath } from './images';
 import {
   normalizeToolSchema,
   translateToolCallToNative,
@@ -57,6 +58,8 @@ interface GeminiPart {
   thought?: boolean;
   functionCall?: GeminiFunctionCall;
   functionResponse?: GeminiFunctionResponse;
+  fileData?: { mimeType?: string; fileUri: string };
+  inlineData?: { mimeType: string; data: string };
 }
 
 interface GeminiFunctionCall {
@@ -82,7 +85,7 @@ interface GeminiRequestBody {
 }
 
 interface AnthropicContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking';
+  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'image';
   text?: string;
   thinking?: string;
   id?: string;
@@ -90,6 +93,7 @@ interface AnthropicContentBlock {
   input?: Record<string, unknown>;
   tool_use_id?: string;
   content?: string | AnthropicContentBlock[];
+  source?: ImageSource;
 }
 
 type AnthropicMessageRole = 'user' | 'assistant';
@@ -150,6 +154,39 @@ interface GeminiUsageMetadata {
 
 // ─── REQUEST: Gemini → Anthropic ──────────────────────────────────────────
 
+function mapContentParts(parts: GeminiPart[]): AnthropicContentBlock[] {
+  const content: AnthropicContentBlock[] = [];
+  for (const part of parts) {
+    const image = getImageSource(part);
+    if (image) {
+      content.push({ type: 'image', source: image });
+    } else if (part.text) {
+      content.push({ type: 'text', text: part.text });
+    } else if (part.fileData) {
+      const file = part.fileData;
+      let text = `[File: ${file.fileUri} (${file.mimeType})]`;
+      let url: URL | undefined;
+      try {
+        url = new URL(file.fileUri);
+      } catch {
+        // Preserve the existing reference fallback for non-image files.
+      }
+      if (url?.protocol === 'file:') {
+        const localPath = localFilePath(url);
+        try {
+          text = `[File:\n${readFileSync(localPath, 'utf-8')}\n]`;
+        } catch {
+          // Preserve the reference fallback for unreadable local text files.
+        }
+      }
+      content.push({ type: 'text', text });
+    } else if (part.inlineData) {
+      content.push({ type: 'text', text: `[${part.inlineData.mimeType}: ${part.inlineData.data}]` });
+    }
+  }
+  return content;
+}
+
 function mapGeminiToolsToAnthropic(geminiTools: GeminiTool[]): AnthropicTool[] {
   if (!geminiTools || !Array.isArray(geminiTools)) return [];
   const anthropicTools: AnthropicTool[] = [];
@@ -177,22 +214,24 @@ export function mapGeminiToAnthropic(
   const messages: AnthropicMessage[] = [];
   const historyCallIds = new Map<string, string[]>();
   const pendingToolResults: AnthropicContentBlock[] = [];
-  const pendingToolResponseTexts: AnthropicContentBlock[] = [];
+  const pendingToolResponseContent: AnthropicContentBlock[] = [];
   const flushToolResults = () => {
     if (!pendingToolResults.length) return;
-    messages.push({ role: 'user', content: [...pendingToolResults, ...pendingToolResponseTexts] });
+    messages.push({ role: 'user', content: [...pendingToolResults, ...pendingToolResponseContent] });
     pendingToolResults.length = 0;
-    pendingToolResponseTexts.length = 0;
+    pendingToolResponseContent.length = 0;
   };
   let system: string | undefined = undefined;
 
   if (geminiBody.systemInstruction && geminiBody.systemInstruction.parts) {
+    assertUserImageParts(geminiBody.systemInstruction.parts, 'system');
     system = geminiBody.systemInstruction.parts.map((p) => p.text || '').join('');
   }
 
   if (geminiBody.contents) {
     for (const item of geminiBody.contents) {
       if (item.parts) {
+        assertUserImageParts(item.parts, item.role || 'user');
         const hasFunctionCall = item.parts.some((p) => p.functionCall);
         const hasFunctionResponse = item.parts.some((p) => p.functionResponse);
         if (!hasFunctionResponse) flushToolResults();
@@ -227,7 +266,7 @@ export function mapGeminiToAnthropic(
           messages.push({ role: 'assistant', content: contentBlocks });
         } else if (hasFunctionResponse) {
           for (const p of item.parts) {
-            if (p.text && !p.thought) pendingToolResponseTexts.push({ type: 'text', text: p.text });
+            if (!p.thought) pendingToolResponseContent.push(...mapContentParts([p]));
             if (p.functionResponse) {
               const funcName = p.functionResponse.name || '';
               const modelTCIds = modelToolCallIds.get(stateKey) || {};
@@ -254,34 +293,10 @@ export function mapGeminiToAnthropic(
           }
         } else {
           const roleStr = item.role === 'model' ? 'assistant' : item.role || 'user';
-          let content = '';
-          if (item.parts) {
-            const partsContent: string[] = [];
-            for (const p of item.parts) {
-              if (p.text) {
-                partsContent.push(p.text);
-              } else if ((p as any).fileData) {
-                const fd = (p as any).fileData;
-                try {
-                  const url = new URL(fd.fileUri);
-                  if (url.protocol === 'file:') {
-                    const fs = require('fs');
-                    partsContent.push(
-                      `[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`,
-                    );
-                  } else {
-                    partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
-                  }
-                } catch {
-                  partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
-                }
-              } else if ((p as any).inlineData) {
-                const id = (p as any).inlineData;
-                partsContent.push(`[${id.mimeType}: ${id.data}]`);
-              }
-            }
-            content = partsContent.join('\n');
-          }
+          const parts = mapContentParts(item.parts);
+          const content = parts.some((part) => part.type === 'image')
+            ? parts
+            : parts.map((part) => part.text || '').join('\n');
           if (roleStr === 'system') {
             system = (system || '') + '\n' + content;
           } else {

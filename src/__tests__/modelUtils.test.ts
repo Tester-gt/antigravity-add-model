@@ -10,6 +10,49 @@ describe('detectModelCapabilities', () => {
     expect(result.maxOutputTokens).toBe(32_768);
   });
 
+  it.each([
+    'deepseek-vl-7b-chat',
+    'deepseek-ai/deepseek-vl2',
+    'deepseek-ai/deepseek-vl2-small',
+    'deepseek-ai/Janus-1.3B',
+    'deepseek-ai/Janus-Pro-7B',
+    'janus:7b',
+    'deepseek-flash',
+    'DeepSeek-V4.1-Flash',
+    'deepseek-v4-flash-vision-exp',
+  ])('recognizes the multimodal model %s across provider formats', (name) => {
+    for (const provider of ['deepseek', 'custom', 'ollama', 'openrouter', 'openai']) {
+      expect(detectModelCapabilities({ name, provider }).supportsImages).toBe(true);
+    }
+  });
+
+  it.each(['deepseek-chat', 'deepseek-reasoner', 'deepseek-r1', 'deepseek-v3', 'deepseek-v4-pro', 'janusaurus'])(
+    'does not enable images for text-only or unknown model %s',
+    (name) => {
+      expect(detectModelCapabilities({ name, provider: 'deepseek' }).supportsImages).toBe(false);
+    },
+  );
+
+  it('honors explicit image capabilities over every provider and model-name fallback', () => {
+    for (const provider of ['google', 'anthropic', 'deepseek', 'custom', 'ollama', 'openrouter', 'openai']) {
+      expect(detectModelCapabilities({ name: 'deepseek-r1', provider, supportsVision: true }).supportsImages).toBe(
+        true,
+      );
+      expect(detectModelCapabilities({ name: 'deepseek-vl2', provider, supportsVision: false }).supportsImages).toBe(
+        false,
+      );
+    }
+  });
+
+  it('recognizes image support from external and optional display names', () => {
+    expect(
+      detectModelCapabilities({ name: 'alias', externalModelName: 'deepseek-vl2', provider: 'custom' }).supportsImages,
+    ).toBe(true);
+    const alias = { name: 'alias', displayName: 'Janus-Pro-7B', provider: 'custom' };
+    expect(detectModelCapabilities(alias).supportsImages).toBe(true);
+    expect(detectModelCapabilities(alias, false).supportsImages).toBe(false);
+  });
+
   it('detects thinking for openai provider', () => {
     const result = detectModelCapabilities({ name: 'gpt-4o', provider: 'openai' });
     expect(result.isThinking).toBe(true);

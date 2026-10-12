@@ -7,11 +7,44 @@ export interface GeminiBody {
   [key: string]: unknown;
 }
 
-/** Conservative estimate, not a tokenizer. Drop whole oldest turns, never half a tool exchange. */
+// A budgeting estimate, not a provider tokenizer. Image token costs depend on
+// the model and dimensions; base64 byte counts are not text token counts.
+const ESTIMATED_IMAGE_TOKENS = 1024;
+
+function estimateContextTokens(body: GeminiBody): number {
+  let imageTokens = 0;
+  const estimatedBody = {
+    ...body,
+    contents: body.contents?.map((content) => ({
+      ...content,
+      parts: content.parts?.map((part) => {
+        let estimatedPart = part;
+        for (const field of ['inlineData', 'fileData'] as const) {
+          const attachment = part[field] as { mimeType?: unknown; data?: unknown; fileUri?: unknown } | undefined;
+          if (!attachment || typeof attachment !== 'object') continue;
+          const isImage =
+            (typeof attachment.mimeType === 'string' && /^image\//i.test(attachment.mimeType.trim())) ||
+            (field === 'fileData' &&
+              typeof attachment.fileUri === 'string' &&
+              /^data:image\//i.test(attachment.fileUri));
+          if (!isImage) continue;
+          imageTokens += ESTIMATED_IMAGE_TOKENS;
+          estimatedPart = {
+            ...estimatedPart,
+            [field]: { ...attachment, [field === 'inlineData' ? 'data' : 'fileUri']: '' },
+          };
+        }
+        return estimatedPart;
+      }),
+    })),
+  };
+  return Math.ceil(Buffer.byteLength(JSON.stringify(estimatedBody), 'utf8') / 3) + imageTokens;
+}
+
+/** Approximate input budget. Drop whole oldest turns, never half a tool exchange. */
 export function trimContext(body: GeminiBody, contextWindow?: number, maxOutputTokens = 0): GeminiBody {
   if (!contextWindow) return body;
   const budget = contextWindow - maxOutputTokens;
-  const estimate = (value: unknown) => Math.ceil(Buffer.byteLength(JSON.stringify(value), 'utf8') / 3);
   const groups: NonNullable<GeminiBody['contents']>[] = [];
   for (const content of body.contents || []) {
     const startsTurn = content.role !== 'model' && !content.parts?.some((part) => part.functionResponse);
@@ -19,11 +52,11 @@ export function trimContext(body: GeminiBody, contextWindow?: number, maxOutputT
     groups[groups.length - 1].push(content);
   }
   const result = { ...body, contents: groups.flat() };
-  while (estimate(result) > budget && groups.length > 1) {
+  while (estimateContextTokens(result) > budget && groups.length > 1) {
     groups.shift();
     result.contents = groups.flat();
   }
-  if (estimate(result) > budget)
+  if (estimateContextTokens(result) > budget)
     throw new Error('The latest turn, system instructions and tools exceed the configured contextWindow.');
   return result;
 }

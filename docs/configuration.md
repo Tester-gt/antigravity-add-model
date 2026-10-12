@@ -53,6 +53,36 @@ Missing metadata keeps the normal defaults; review limits and capabilities for
 your chosen model. Discovery does not generate a completion or verify tool use.
 See [providers and model catalogs](providers.md) for endpoints and service-specific details.
 
+## Image inputs
+
+Choose a model and endpoint that actually support image understanding. Discovery
+imports image capability metadata when the provider supplies it; otherwise the
+addon recognizes known vision model names, including DeepSeek-VL/VL2 and
+Janus/Janus-Pro. These open models require a compatible serving endpoint; their
+names alone do not make them available on the hosted DeepSeek API. See the
+[DeepSeek vision guide](https://api-docs.deepseek.com/guides/vision/) for currently
+supported hosted models.
+
+In the model editor, **Advanced settings → Image input → Supported** explicitly
+enables image attachments. **Unsupported** disables them; **Auto detect** uses the
+model's default detection. JSON/import users can set `supportsVision: true` or
+`false`. Both values take priority over name detection. This setting cannot add
+vision to a text-only upstream model.
+
+The desktop proxy forwards PNG, JPEG, GIF and WebP images as native image blocks
+for OpenAI-compatible and Anthropic-compatible endpoints. It preserves images in
+user conversation history, including images beside tool results. Inline base64,
+base64 data URLs and local `file://` images are sent as image data; HTTP(S) image
+URLs are passed to the selected provider and must be publicly accessible. Private URLs requiring a
+separate login must be supplied as inline image data or a local file instead.
+Incoming Google credentials are not forwarded to image URLs. Unsupported image
+formats and unreadable local images return a clear error instead of being sent
+as text. These formats accept image input in user messages.
+
+Desktop context trimming budgets an estimated 1024 tokens per image rather than
+treating base64 bytes as text tokens. Actual image cost depends on the provider,
+model and resolution; upstream image-size and context limits still apply.
+
 ## Fields and advanced settings
 
 Most fields are exposed under **Advanced settings**. Fields marked JSON/import
@@ -84,7 +114,7 @@ are supported in configuration but do not have a separate editor control.
 | `googleAccounts`, `googleProject`, `googlePool` | Cloud Code accounts, optional default project, and account-selection settings; see below. |
 
 Timeout/budget fields accept `1`–`3600000` milliseconds. Context limiting uses a
-conservative token estimate and removes whole oldest turns while preserving
+rough token estimate and removes whole oldest turns while preserving
 supported tool exchanges. The proxy refuses a latest turn that still cannot fit.
 Retries and fallback stop after output starts; they do not duplicate an already
 streamed answer. Renaming/deleting a model updates its saved fallback references.

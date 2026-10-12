@@ -191,6 +191,8 @@ Presets fill in defaults; **API format** determines how requests are translated.
 
 **Want hundreds of model choices?** OpenRouter and other multi-model services supply live catalogs through **Fetch provider models**. Search and select the models you need; the addon imports available context/output limits and image/reasoning metadata while preserving your explicit overrides. Catalogs change over time, and a listed model still needs account access and the capabilities your task requires. See [provider setup and model discovery](docs/providers.md).
 
+**Using a vision model?** The desktop proxy forwards image inputs to OpenAI-compatible and Anthropic-compatible endpoints, including compatible DeepSeek vision models. See [image input setup](docs/configuration.md#image-inputs) for capability overrides, supported formats and endpoint requirements.
+
 Open **Advanced settings** for request limits, reasoning, headers, fallback models, and other overrides. See the [configuration reference](docs/configuration.md) for field definitions and a sample import.
 
 For Google account pooling, choose **Google Cloud Code account pool** and follow the [account setup guide](docs/configuration.md#google-cloud-code-account-pools). You supply your own Desktop OAuth client; account and service eligibility remain provider-controlled.

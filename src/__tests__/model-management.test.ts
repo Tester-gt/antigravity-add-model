@@ -8,6 +8,7 @@ import { ModelStore, normalizeModelConfig } from '../modelStore';
 import { createModelManager, modelListUrl, requestJson } from '../modelManagement';
 import { GoogleLoginOptions } from '../googleOAuth';
 import { GoogleAccount } from '../googleAccounts';
+import { detectModelCapabilities } from '../proxy/modelUtils';
 
 const codec = {
   encryptString: (value: string) => `test:${Buffer.from(value).toString('base64')}`,
@@ -56,6 +57,31 @@ afterEach(async () => {
 });
 
 describe('model storage and compatibility', () => {
+  it('imports DeepSeek input modalities and preserves negative metadata over name heuristics', async () => {
+    const url = await server((_req, res) => {
+      res.end(
+        JSON.stringify({
+          data: [
+            { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', input_modalities: ['text', 'image'] },
+            { id: 'deepseek-v4-pro', input_modalities: ['text'] },
+            { id: 'deepseek-vl2', input_modalities: ['text'], architecture: { input_modalities: ['text', 'image'] } },
+            { id: 'deepseek-ai/Janus-Pro-7B', input_modalities: ['text', 'image'], supportsVision: false },
+            { id: 'unknown-image-model', input_modalities: ['Text', 'Image'] },
+            { id: 'deepseek-unknown' },
+          ],
+        }),
+      );
+    });
+    const { manager } = setup();
+    const { models } = await manager.discoverModels({ provider: 'deepseek', apiUrl: url, apiKey: 'test-key' });
+    expect(models.map((model) => model.supportsVision)).toEqual([true, false, false, false, true, undefined]);
+    for (const model of models) {
+      expect(detectModelCapabilities({ ...model, name: model.id, provider: 'deepseek' }).supportsImages).toBe(
+        model.supportsVision ?? false,
+      );
+    }
+  });
+
   it('encrypts preserved legacy plaintext secrets when a masked model is saved', () => {
     const { manager } = setup();
     fs.writeFileSync(manager.store.filename, JSON.stringify({ models: [entry] }));

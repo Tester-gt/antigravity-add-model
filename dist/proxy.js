@@ -89,6 +89,39 @@ function toSlug(model) {
             .replace(/^-+|-+$/g, '')
             .toLowerCase());
 }
+function getAdvertisedModelCapabilities(model) {
+    const cap = (0, modelUtils_1.detectModelCapabilities)(model);
+    const nativeGoogle = !model.gateway && (model.apiFormat === 'google' ||
+        (!model.apiFormat && ['google', 'google-cloudcode'].includes(model.provider)));
+    return {
+        supportsImages: cap.supportsImages,
+        supportsThinking: cap.isThinking,
+        supportsVideo: false,
+        supportedMimeTypes: {
+            ...(cap.supportsImages
+                ? {
+                    'image/png': true,
+                    'image/jpeg': true,
+                    'image/webp': true,
+                    'image/gif': true,
+                    ...(nativeGoogle ? { 'image/heic': true, 'image/heif': true } : {}),
+                }
+                : {}),
+            'text/plain': true,
+            'text/markdown': true,
+            'text/html': true,
+            'text/css': true,
+            'text/xml': true,
+            'text/csv': true,
+            'application/json': true,
+            'application/pdf': true,
+            'application/x-javascript': true,
+            'application/x-typescript': true,
+            'application/x-python-code': true,
+            'application/x-ipynb+json': true,
+        },
+    };
+}
 // ─── Model Loading ────────────────────────────────────────────────────────
 function loadCustomModels() {
     const filePath = getCustomModelsPath();
@@ -327,6 +360,11 @@ async function resolveFileData(body, reqHeaders) {
             const p = item.parts[i];
             const fd = p.fileData;
             if (!fd?.fileUri)
+                continue;
+            // Keep image bytes/URLs intact for the wire-format translator. In particular,
+            // never decode a binary image as UTF-8 or send incoming Google credentials
+            // to an arbitrary image URL. Remote images must be accessible to the provider.
+            if ((typeof fd.mimeType === 'string' && /^image\//i.test(fd.mimeType.trim())) || /^data:image\//i.test(fd.fileUri))
                 continue;
             try {
                 const uri = fd.fileUri;
@@ -719,6 +757,7 @@ function handleRequest(req, res) {
                             const slug = toSlug(m);
                             mappedCustom[slug] = {
                                 displayName: m.displayName,
+                                ...getAdvertisedModelCapabilities(m),
                                 maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
                                 maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
                                 model: generateModelPlaceholderId(m),
@@ -747,6 +786,7 @@ function handleRequest(req, res) {
                                         version: '1.0',
                                         displayName: m.displayName,
                                         description: m.description,
+                                        ...getAdvertisedModelCapabilities(m),
                                         inputTokenLimit: cap.maxTokens,
                                         outputTokenLimit: cap.maxOutputTokens,
                                         supportedGenerationMethods: ['generateContent', 'countTokens'],
@@ -764,8 +804,7 @@ function handleRequest(req, res) {
                                     const cap = (0, modelUtils_1.detectModelCapabilities)(m, true);
                                     const entry = {
                                         displayName: m.displayName,
-                                        supportsImages: cap.supportsImages,
-                                        supportsThinking: cap.isThinking,
+                                        ...getAdvertisedModelCapabilities(m),
                                         recommended: true,
                                         maxTokens: cap.maxTokens,
                                         maxOutputTokens: cap.maxOutputTokens,
@@ -774,46 +813,6 @@ function handleRequest(req, res) {
                                         apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
                                         modelProvider: 'MODEL_PROVIDER_GOOGLE',
                                     };
-                                    if (cap.supportsImages) {
-                                        entry.supportsVideo = false;
-                                        entry.supportedMimeTypes = {
-                                            'image/png': true,
-                                            'image/jpeg': true,
-                                            'image/webp': true,
-                                            'image/gif': true,
-                                            'image/heic': true,
-                                            'image/heif': true,
-                                            'text/plain': true,
-                                            'text/markdown': true,
-                                            'text/html': true,
-                                            'text/css': true,
-                                            'text/xml': true,
-                                            'text/csv': true,
-                                            'application/json': true,
-                                            'application/pdf': true,
-                                            'application/x-javascript': true,
-                                            'application/x-typescript': true,
-                                            'application/x-python-code': true,
-                                            'application/x-ipynb+json': true,
-                                        };
-                                    }
-                                    else {
-                                        entry.supportsVideo = false;
-                                        entry.supportedMimeTypes = {
-                                            'text/plain': true,
-                                            'text/markdown': true,
-                                            'text/html': true,
-                                            'text/css': true,
-                                            'text/xml': true,
-                                            'text/csv': true,
-                                            'application/json': true,
-                                            'application/pdf': true,
-                                            'application/x-javascript': true,
-                                            'application/x-typescript': true,
-                                            'application/x-python-code': true,
-                                            'application/x-ipynb+json': true,
-                                        };
-                                    }
                                     result[slug] = entry;
                                     m._slug = slug;
                                     electron_log_1.default.info(`[Proxy] Custom model "${m.displayName}" => slug: ${slug} => model: ${generateModelPlaceholderId(m)} => thinking: ${cap.isThinking} => images: ${cap.supportsImages}`);
@@ -841,6 +840,7 @@ function handleRequest(req, res) {
                                 const slug = toSlug(m);
                                 modelsMap[slug] = {
                                     displayName: m.displayName,
+                                    ...getAdvertisedModelCapabilities(m),
                                     recommended: true,
                                     maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
                                     maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
@@ -883,6 +883,7 @@ function handleRequest(req, res) {
                             const slug = toSlug(m);
                             mappedCustom[slug] = {
                                 displayName: m.displayName,
+                                ...getAdvertisedModelCapabilities(m),
                                 maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
                                 maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
                                 model: generateModelPlaceholderId(m),
@@ -903,6 +904,7 @@ function handleRequest(req, res) {
                     const slug = toSlug(m);
                     mappedCustom[slug] = {
                         displayName: m.displayName,
+                        ...getAdvertisedModelCapabilities(m),
                         maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
                         maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
                         model: generateModelPlaceholderId(m),
@@ -944,6 +946,7 @@ function handleRequest(req, res) {
                                 name: m.name,
                                 displayName: m.displayName,
                                 description: m.description,
+                                ...getAdvertisedModelCapabilities(m),
                                 supportedGenerationMethods: ['generateContent'],
                             })),
                         }));
@@ -960,6 +963,7 @@ function handleRequest(req, res) {
                             version: '1.0',
                             displayName: m.displayName,
                             description: m.description,
+                            ...getAdvertisedModelCapabilities(m),
                             inputTokenLimit: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
                             outputTokenLimit: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
                             supportedGenerationMethods: ['generateContent', 'countTokens'],
@@ -984,6 +988,7 @@ function handleRequest(req, res) {
                             version: '1.0',
                             displayName: m.displayName,
                             description: m.description,
+                            ...getAdvertisedModelCapabilities(m),
                             inputTokenLimit: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
                             outputTokenLimit: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
                             supportedGenerationMethods: ['generateContent', 'countTokens'],
@@ -1002,6 +1007,7 @@ function handleRequest(req, res) {
                         name: m.name,
                         displayName: m.displayName,
                         description: m.description,
+                        ...getAdvertisedModelCapabilities(m),
                         supportedGenerationMethods: ['generateContent'],
                     })),
                 }));

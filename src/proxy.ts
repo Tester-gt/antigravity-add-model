@@ -127,6 +127,40 @@ function toSlug(model: CustomModel): string {
   );
 }
 
+function getAdvertisedModelCapabilities(model: CustomModel) {
+  const cap = detectModelCapabilities(model);
+  const nativeGoogle = !model.gateway && (model.apiFormat === 'google' ||
+    (!model.apiFormat && ['google', 'google-cloudcode'].includes(model.provider)));
+  return {
+    supportsImages: cap.supportsImages,
+    supportsThinking: cap.isThinking,
+    supportsVideo: false,
+    supportedMimeTypes: {
+      ...(cap.supportsImages
+        ? {
+            'image/png': true,
+            'image/jpeg': true,
+            'image/webp': true,
+            'image/gif': true,
+            ...(nativeGoogle ? { 'image/heic': true, 'image/heif': true } : {}),
+          }
+        : {}),
+      'text/plain': true,
+      'text/markdown': true,
+      'text/html': true,
+      'text/css': true,
+      'text/xml': true,
+      'text/csv': true,
+      'application/json': true,
+      'application/pdf': true,
+      'application/x-javascript': true,
+      'application/x-typescript': true,
+      'application/x-python-code': true,
+      'application/x-ipynb+json': true,
+    },
+  };
+}
+
 // ─── Model Loading ────────────────────────────────────────────────────────
 
 function loadCustomModels(): CustomModel[] {
@@ -381,6 +415,10 @@ async function resolveFileData(body: GeminiRequestBody, reqHeaders: Record<strin
       const p = item.parts[i] as Record<string, unknown>;
       const fd = p.fileData as { mimeType?: string; fileUri?: string } | undefined;
       if (!fd?.fileUri) continue;
+      // Keep image bytes/URLs intact for the wire-format translator. In particular,
+      // never decode a binary image as UTF-8 or send incoming Google credentials
+      // to an arbitrary image URL. Remote images must be accessible to the provider.
+      if ((typeof fd.mimeType === 'string' && /^image\//i.test(fd.mimeType.trim())) || /^data:image\//i.test(fd.fileUri)) continue;
       try {
         const uri = fd.fileUri; let fileContent = '';
         if (uri.startsWith('file://')) {
@@ -810,6 +848,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               const slug = toSlug(m);
               mappedCustom[slug] = {
                 displayName: m.displayName,
+                ...getAdvertisedModelCapabilities(m),
                 maxTokens: detectModelCapabilities(m).maxTokens,
                 maxOutputTokens: detectModelCapabilities(m).maxOutputTokens,
                 model: generateModelPlaceholderId(m),
@@ -844,6 +883,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                     version: '1.0',
                     displayName: m.displayName,
                     description: m.description,
+                    ...getAdvertisedModelCapabilities(m),
                     inputTokenLimit: cap.maxTokens,
                     outputTokenLimit: cap.maxOutputTokens,
                     supportedGenerationMethods: ['generateContent', 'countTokens'],
@@ -860,8 +900,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                   const cap = detectModelCapabilities(m, true);
                   const entry: Record<string, unknown> = {
                     displayName: m.displayName,
-                    supportsImages: cap.supportsImages,
-                    supportsThinking: cap.isThinking,
+                    ...getAdvertisedModelCapabilities(m),
                     recommended: true,
                     maxTokens: cap.maxTokens,
                     maxOutputTokens: cap.maxOutputTokens,
@@ -870,45 +909,6 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                     apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
                     modelProvider: 'MODEL_PROVIDER_GOOGLE',
                   };
-                  if (cap.supportsImages) {
-                    entry.supportsVideo = false;
-                    entry.supportedMimeTypes = {
-                      'image/png': true,
-                      'image/jpeg': true,
-                      'image/webp': true,
-                      'image/gif': true,
-                      'image/heic': true,
-                      'image/heif': true,
-                      'text/plain': true,
-                      'text/markdown': true,
-                      'text/html': true,
-                      'text/css': true,
-                      'text/xml': true,
-                      'text/csv': true,
-                      'application/json': true,
-                      'application/pdf': true,
-                      'application/x-javascript': true,
-                      'application/x-typescript': true,
-                      'application/x-python-code': true,
-                      'application/x-ipynb+json': true,
-                    };
-                  } else {
-                    entry.supportsVideo = false;
-                    entry.supportedMimeTypes = {
-                      'text/plain': true,
-                      'text/markdown': true,
-                      'text/html': true,
-                      'text/css': true,
-                      'text/xml': true,
-                      'text/csv': true,
-                      'application/json': true,
-                      'application/pdf': true,
-                      'application/x-javascript': true,
-                      'application/x-typescript': true,
-                      'application/x-python-code': true,
-                      'application/x-ipynb+json': true,
-                    };
-                  }
                   (result as Record<string, unknown>)[slug] = entry;
                   m._slug = slug;
                   log.info(
@@ -940,6 +940,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                 const slug = toSlug(m);
                 modelsMap[slug] = {
                   displayName: m.displayName,
+                  ...getAdvertisedModelCapabilities(m),
                   recommended: true,
                   maxTokens: detectModelCapabilities(m).maxTokens,
                   maxOutputTokens: detectModelCapabilities(m).maxOutputTokens,
@@ -983,6 +984,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               const slug = toSlug(m);
               mappedCustom[slug] = {
                 displayName: m.displayName,
+                ...getAdvertisedModelCapabilities(m),
                 maxTokens: detectModelCapabilities(m).maxTokens,
                 maxOutputTokens: detectModelCapabilities(m).maxOutputTokens,
                 model: generateModelPlaceholderId(m),
@@ -1004,6 +1006,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           const slug = toSlug(m);
           mappedCustom[slug] = {
             displayName: m.displayName,
+            ...getAdvertisedModelCapabilities(m),
             maxTokens: detectModelCapabilities(m).maxTokens,
             maxOutputTokens: detectModelCapabilities(m).maxOutputTokens,
             model: generateModelPlaceholderId(m),
@@ -1051,6 +1054,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                   name: m.name,
                   displayName: m.displayName,
                   description: m.description,
+                  ...getAdvertisedModelCapabilities(m),
                   supportedGenerationMethods: ['generateContent'],
                 })),
               }),
@@ -1070,6 +1074,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               version: '1.0',
               displayName: m.displayName,
               description: m.description,
+              ...getAdvertisedModelCapabilities(m),
               inputTokenLimit: detectModelCapabilities(m).maxTokens,
               outputTokenLimit: detectModelCapabilities(m).maxOutputTokens,
               supportedGenerationMethods: ['generateContent', 'countTokens'],
@@ -1094,6 +1099,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               version: '1.0',
               displayName: m.displayName,
               description: m.description,
+              ...getAdvertisedModelCapabilities(m),
               inputTokenLimit: detectModelCapabilities(m).maxTokens,
               outputTokenLimit: detectModelCapabilities(m).maxOutputTokens,
               supportedGenerationMethods: ['generateContent', 'countTokens'],
@@ -1114,6 +1120,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               name: m.name,
               displayName: m.displayName,
               description: m.description,
+              ...getAdvertisedModelCapabilities(m),
               supportedGenerationMethods: ['generateContent'],
             })),
           }),

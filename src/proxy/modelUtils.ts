@@ -37,8 +37,12 @@ const DEEPSEEK_PATTERN = /deepseek/i;
 const CLAUDE_PATTERN = /claude|opus|sonnet/i;
 const CLAUDE_THINKING_PATTERN = /opus-4|sonnet-4|claude-4|claude-3-5|claude-3-7/i;
 const THINKING_MODEL_PATTERN = /opus-4|sonnet-4|claude-4/i;
-const IMAGE_SUPPORT_PATTERN = /gpt-4o|gpt-4-turbo|claude|gemini|vision|llava|qwenvl|pixtral|yi-vision|cogvlm|kimi|moonshot/i;
-const NO_IMAGE_PATTERN = /deepseek(?!.*vision)|llama(?!.*vision)|mixtral(?!.*vision)|mistral(?!.*pixtral)|codestral|qwen(?!.*vl)/i;
+const IMAGE_SUPPORT_PATTERN =
+  /gpt-4o|gpt-4-turbo|claude|gemini|vision|llava|qwenvl|pixtral|yi-vision|cogvlm|kimi|moonshot/i;
+// Positive family matches avoid excluding vision models just because their name
+// also contains a provider's text-only model family (for example DeepSeek-VL2).
+const DEEPSEEK_IMAGE_PATTERN =
+  /(?:^|[\s/])(?:deepseek[-_ ]?vl2?|janus(?:[-_ ]?pro)?|deepseek-flash|deepseek-v4\.1-flash)(?=$|[-_:/\s])/i;
 
 /**
  * Detects model capabilities from a custom model config object.
@@ -48,13 +52,14 @@ export function detectModelCapabilities(m: CustomModelConfig, includeDisplayName
   const extLower = (m.externalModelName || '').toLowerCase();
   const displayLower = includeDisplayName ? (m.displayName || '').toLowerCase() : '';
 
-  const isThinking = m.supportsThinking ?? (
-    m.provider === 'anthropic' ||
-    m.provider === 'openai' ||
-    m.provider === 'openrouter' ||
-    THINKING_PATTERN.test(nameLower) ||
-    THINKING_PATTERN.test(extLower) ||
-    (includeDisplayName && THINKING_PATTERN.test(displayLower)));
+  const isThinking =
+    m.supportsThinking ??
+    (m.provider === 'anthropic' ||
+      m.provider === 'openai' ||
+      m.provider === 'openrouter' ||
+      THINKING_PATTERN.test(nameLower) ||
+      THINKING_PATTERN.test(extLower) ||
+      (includeDisplayName && THINKING_PATTERN.test(displayLower)));
 
   const isDeepSeek =
     DEEPSEEK_PATTERN.test(nameLower) ||
@@ -66,14 +71,15 @@ export function detectModelCapabilities(m: CustomModelConfig, includeDisplayName
   const maxTokens = m.contextWindow ?? (isClaude ? 200_000 : 1_048_576);
   const maxOutputTokens = m.maxOutputTokens ?? (isDeepSeek ? 32_768 : isThinking ? 32_768 : 16_384);
 
-  // Image support: Claude, GPT-4o, Gemini always support images. DeepSeek, Ollama text models don't.
+  // Explicit configuration (including imported provider metadata) wins over
+  // provider/name fallbacks, in both directions. Unknown models remain text-only.
   const allNames = nameLower + ' ' + extLower + ' ' + displayLower;
-  const supportsImages = m.supportsVision ?? (
-    m.provider === 'anthropic' ||
-    m.provider === 'google' ||
-    (m.provider === 'openai' && IMAGE_SUPPORT_PATTERN.test(allNames)) ||
-    (m.provider === 'openrouter' && IMAGE_SUPPORT_PATTERN.test(allNames)) ||
-    (IMAGE_SUPPORT_PATTERN.test(allNames) && !NO_IMAGE_PATTERN.test(allNames)));
+  const supportsImages =
+    m.supportsVision ??
+    (m.provider === 'anthropic' ||
+      m.provider === 'google' ||
+      IMAGE_SUPPORT_PATTERN.test(allNames) ||
+      DEEPSEEK_IMAGE_PATTERN.test(allNames));
 
   return { isThinking, isDeepSeek, isClaude, maxTokens, maxOutputTokens, supportsImages };
 }

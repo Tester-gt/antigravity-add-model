@@ -30,7 +30,7 @@ interface GeminiPart {
     functionCall?: GeminiFunctionCall;
     functionResponse?: GeminiFunctionResponse;
     fileData?: {
-        mimeType: string;
+        mimeType?: string;
         fileUri: string;
     };
     inlineData?: {
@@ -59,9 +59,18 @@ interface GeminiRequestBody {
         maxOutputTokens?: number;
     };
 }
+type OpenAIContentPart = {
+    type: 'text';
+    text: string;
+} | {
+    type: 'image_url';
+    image_url: {
+        url: string;
+    };
+};
 interface OpenAIMessage {
     role: string;
-    content: string | null;
+    content: string | OpenAIContentPart[] | null;
     tool_calls?: OpenAIToolCall[];
     tool_call_id?: string;
     reasoning_content?: string;

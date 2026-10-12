@@ -1,37 +1,4 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -44,12 +11,50 @@ exports.mapGeminiToolsToAnthropic = mapGeminiToolsToAnthropic;
  * Anthropic provider translator.
  * Handles Gemini ↔ Anthropic request/response mapping and streaming SSE events.
  */
-const path = __importStar(require("path"));
+const fs_1 = require("fs");
 const electron_log_1 = __importDefault(require("electron-log"));
+const images_1 = require("./images");
 const utils_1 = require("./utils");
 const shared_1 = require("../shared");
 const modelUtils_1 = require("../modelUtils");
 // ─── REQUEST: Gemini → Anthropic ──────────────────────────────────────────
+function mapContentParts(parts) {
+    const content = [];
+    for (const part of parts) {
+        const image = (0, images_1.getImageSource)(part);
+        if (image) {
+            content.push({ type: 'image', source: image });
+        }
+        else if (part.text) {
+            content.push({ type: 'text', text: part.text });
+        }
+        else if (part.fileData) {
+            const file = part.fileData;
+            let text = `[File: ${file.fileUri} (${file.mimeType})]`;
+            let url;
+            try {
+                url = new URL(file.fileUri);
+            }
+            catch {
+                // Preserve the existing reference fallback for non-image files.
+            }
+            if (url?.protocol === 'file:') {
+                const localPath = (0, images_1.localFilePath)(url);
+                try {
+                    text = `[File:\n${(0, fs_1.readFileSync)(localPath, 'utf-8')}\n]`;
+                }
+                catch {
+                    // Preserve the reference fallback for unreadable local text files.
+                }
+            }
+            content.push({ type: 'text', text });
+        }
+        else if (part.inlineData) {
+            content.push({ type: 'text', text: `[${part.inlineData.mimeType}: ${part.inlineData.data}]` });
+        }
+    }
+    return content;
+}
 function mapGeminiToolsToAnthropic(geminiTools) {
     if (!geminiTools || !Array.isArray(geminiTools))
         return [];
@@ -73,21 +78,23 @@ function mapGeminiToAnthropic(geminiBody, modelName, stateKey = modelName) {
     const messages = [];
     const historyCallIds = new Map();
     const pendingToolResults = [];
-    const pendingToolResponseTexts = [];
+    const pendingToolResponseContent = [];
     const flushToolResults = () => {
         if (!pendingToolResults.length)
             return;
-        messages.push({ role: 'user', content: [...pendingToolResults, ...pendingToolResponseTexts] });
+        messages.push({ role: 'user', content: [...pendingToolResults, ...pendingToolResponseContent] });
         pendingToolResults.length = 0;
-        pendingToolResponseTexts.length = 0;
+        pendingToolResponseContent.length = 0;
     };
     let system = undefined;
     if (geminiBody.systemInstruction && geminiBody.systemInstruction.parts) {
+        (0, images_1.assertUserImageParts)(geminiBody.systemInstruction.parts, 'system');
         system = geminiBody.systemInstruction.parts.map((p) => p.text || '').join('');
     }
     if (geminiBody.contents) {
         for (const item of geminiBody.contents) {
             if (item.parts) {
+                (0, images_1.assertUserImageParts)(item.parts, item.role || 'user');
                 const hasFunctionCall = item.parts.some((p) => p.functionCall);
                 const hasFunctionResponse = item.parts.some((p) => p.functionResponse);
                 if (!hasFunctionResponse)
@@ -123,8 +130,8 @@ function mapGeminiToAnthropic(geminiBody, modelName, stateKey = modelName) {
                 }
                 else if (hasFunctionResponse) {
                     for (const p of item.parts) {
-                        if (p.text && !p.thought)
-                            pendingToolResponseTexts.push({ type: 'text', text: p.text });
+                        if (!p.thought)
+                            pendingToolResponseContent.push(...mapContentParts([p]));
                         if (p.functionResponse) {
                             const funcName = p.functionResponse.name || '';
                             const modelTCIds = shared_1.modelToolCallIds.get(stateKey) || {};
@@ -154,36 +161,10 @@ function mapGeminiToAnthropic(geminiBody, modelName, stateKey = modelName) {
                 }
                 else {
                     const roleStr = item.role === 'model' ? 'assistant' : item.role || 'user';
-                    let content = '';
-                    if (item.parts) {
-                        const partsContent = [];
-                        for (const p of item.parts) {
-                            if (p.text) {
-                                partsContent.push(p.text);
-                            }
-                            else if (p.fileData) {
-                                const fd = p.fileData;
-                                try {
-                                    const url = new URL(fd.fileUri);
-                                    if (url.protocol === 'file:') {
-                                        const fs = require('fs');
-                                        partsContent.push(`[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`);
-                                    }
-                                    else {
-                                        partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
-                                    }
-                                }
-                                catch {
-                                    partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
-                                }
-                            }
-                            else if (p.inlineData) {
-                                const id = p.inlineData;
-                                partsContent.push(`[${id.mimeType}: ${id.data}]`);
-                            }
-                        }
-                        content = partsContent.join('\n');
-                    }
+                    const parts = mapContentParts(item.parts);
+                    const content = parts.some((part) => part.type === 'image')
+                        ? parts
+                        : parts.map((part) => part.text || '').join('\n');
                     if (roleStr === 'system') {
                         system = (system || '') + '\n' + content;
                     }

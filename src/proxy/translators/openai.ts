@@ -2,9 +2,10 @@
  * OpenAI/Ollama provider translator.
  * Handles Gemini ↔ OpenAI/Ollama request/response mapping and streaming chunks.
  */
-import * as path from 'path';
+import { readFileSync } from 'fs';
 
 import log from 'electron-log';
+import { assertUserImageParts, getImageSource, localFilePath } from './images';
 import {
   normalizeToolSchema,
   translateToolCallToNative,
@@ -61,7 +62,7 @@ interface GeminiPart {
   thought?: boolean;
   functionCall?: GeminiFunctionCall;
   functionResponse?: GeminiFunctionResponse;
-  fileData?: { mimeType: string; fileUri: string };
+  fileData?: { mimeType?: string; fileUri: string };
   inlineData?: { mimeType: string; data: string };
 }
 
@@ -87,9 +88,11 @@ interface GeminiRequestBody {
   };
 }
 
+type OpenAIContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
 interface OpenAIMessage {
   role: string;
-  content: string | null;
+  content: string | OpenAIContentPart[] | null;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   reasoning_content?: string;
@@ -175,6 +178,51 @@ interface DSMLParsedResult {
 
 // ─── REQUEST: Gemini → OpenAI ──────────────────────────────────────────────
 
+function mapUserContentParts(parts: GeminiPart[]): OpenAIContentPart[] {
+  const content: OpenAIContentPart[] = [];
+  for (const part of parts) {
+    const image = getImageSource(part);
+    if (image) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: image.type === 'url' ? image.url : `data:${image.media_type};base64,${image.data}` },
+      });
+    } else if (part.text) {
+      content.push({ type: 'text', text: part.text });
+    } else if (part.fileData) {
+      const file = part.fileData;
+      let text = `[File reference: ${file.fileUri} (${file.mimeType})]`;
+      let url: URL | undefined;
+      try {
+        url = new URL(file.fileUri);
+      } catch {
+        // Preserve the existing reference fallback for non-image files.
+      }
+      if (url?.protocol === 'file:') {
+        const localPath = localFilePath(url);
+        try {
+          text = `[File content from ${file.fileUri}]:\n${readFileSync(localPath, 'utf-8')}`;
+        } catch {
+          // Preserve the reference fallback for unreadable local text files.
+        }
+      }
+      content.push({ type: 'text', text });
+    } else if (part.inlineData) {
+      content.push({
+        type: 'text',
+        text: `[Inline data: ${part.inlineData.mimeType}, length: ${(part.inlineData.data || '').length} chars]`,
+      });
+    }
+  }
+  return content;
+}
+
+function compactContent(parts: OpenAIContentPart[]): string | OpenAIContentPart[] {
+  return parts.some((part) => part.type === 'image_url')
+    ? parts
+    : parts.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
+}
+
 function mapGeminiToolsToOpenAI(geminiTools: GeminiTool[]): OpenAITool[] {
   if (!geminiTools || !Array.isArray(geminiTools)) return [];
   const openaiTools: OpenAITool[] = [];
@@ -204,14 +252,15 @@ export function mapGeminiToOpenAI(
 ): OpenAIRequestBody {
   const messages: OpenAIMessage[] = [];
   const historyCallIds = new Map<string, string[]>();
-  const pendingToolResponseTexts: string[] = [];
-  const flushToolResponseTexts = () => {
-    if (!pendingToolResponseTexts.length) return;
-    messages.push({ role: 'user', content: pendingToolResponseTexts.join('\n') });
-    pendingToolResponseTexts.length = 0;
+  const pendingToolResponseContent: OpenAIContentPart[] = [];
+  const flushToolResponseContent = () => {
+    if (!pendingToolResponseContent.length) return;
+    messages.push({ role: 'user', content: compactContent([...pendingToolResponseContent]) });
+    pendingToolResponseContent.length = 0;
   };
 
   if (geminiBody.systemInstruction && geminiBody.systemInstruction.parts) {
+    assertUserImageParts(geminiBody.systemInstruction.parts, 'system');
     const systemText = geminiBody.systemInstruction.parts.map((p) => p.text || '').join('');
     if (systemText) {
       messages.push({ role: 'system', content: systemText });
@@ -221,9 +270,10 @@ export function mapGeminiToOpenAI(
   if (geminiBody.contents) {
     for (const item of geminiBody.contents) {
       if (item.parts) {
+        assertUserImageParts(item.parts, item.role || 'user');
         const hasFunctionCall = item.parts.some((p) => p.functionCall);
         const hasFunctionResponse = item.parts.some((p) => p.functionResponse);
-        if (!hasFunctionResponse) flushToolResponseTexts();
+        if (!hasFunctionResponse) flushToolResponseContent();
 
         if (hasFunctionCall && item.role === 'model') {
           const toolCalls: OpenAIToolCall[] = [];
@@ -257,7 +307,7 @@ export function mapGeminiToOpenAI(
           messages.push({ role: 'assistant', content: text || null, tool_calls: toolCalls });
         } else if (hasFunctionResponse) {
           for (const p of item.parts) {
-            if (p.text && !p.thought) pendingToolResponseTexts.push(p.text);
+            if (!p.thought) pendingToolResponseContent.push(...mapUserContentParts([p]));
             if (p.functionResponse) {
               const funcName = p.functionResponse.name || '';
               const modelTCIds = modelToolCallIds.get(stateKey) || {};
@@ -280,7 +330,7 @@ export function mapGeminiToOpenAI(
           }
         } else {
           const role = item.role === 'model' ? 'assistant' : item.role || 'user';
-          let content = '';
+          let content: OpenAIMessage['content'] = '';
           let reasoning_content = '';
           if (role === 'assistant') {
             const regularParts = (item.parts || []).filter((p) => !p.thought);
@@ -288,39 +338,7 @@ export function mapGeminiToOpenAI(
             content = regularParts.map((p) => p.text || '').join('');
             reasoning_content = thoughtParts.map((p) => p.text || '').join('');
           } else {
-            const parts = item.parts || [];
-            const partsContent: string[] = [];
-            for (const p of parts) {
-              if (p.text) {
-                partsContent.push(p.text);
-              } else if (p.fileData) {
-                const fd = p.fileData as { mimeType: string; fileUri: string };
-                // Try to read local files directly
-                try {
-                  const url = new URL(fd.fileUri);
-                  if (url.protocol === 'file:') {
-                    const fs = require('fs');
-                    const fileContent = fs.readFileSync(
-                      url.pathname.replace(/^\//, '').replace(/\//g, path.sep),
-                      'utf-8',
-                    );
-                    partsContent.push(`[File content from ${fd.fileUri}]:\n${fileContent}`);
-                  } else {
-                    partsContent.push(`[File reference: ${fd.fileUri} (${fd.mimeType})]`);
-                  }
-                } catch {
-                  partsContent.push(`[File reference: ${fd.fileUri} (${fd.mimeType})]`);
-                }
-              } else if (p.inlineData) {
-                const id = p.inlineData as { mimeType: string; data: string };
-                if (id.mimeType && id.mimeType.startsWith('image/')) {
-                  partsContent.push(`[Image: data:${id.mimeType};base64,${id.data}]`);
-                } else {
-                  partsContent.push(`[Inline data: ${id.mimeType}, length: ${(id.data || '').length} chars]`);
-                }
-              }
-            }
-            content = partsContent.join('\n');
+            content = compactContent(mapUserContentParts(item.parts));
           }
           const msg: OpenAIMessage = { role, content };
           if (reasoning_content) msg.reasoning_content = reasoning_content;
@@ -330,7 +348,7 @@ export function mapGeminiToOpenAI(
     }
   }
   // Keep feedback after all consecutive tool results, including split parallel responses.
-  flushToolResponseTexts();
+  flushToolResponseContent();
 
   // Inject reasoning_content into assistant messages missing it
   let lastAssistantIdx = -1;

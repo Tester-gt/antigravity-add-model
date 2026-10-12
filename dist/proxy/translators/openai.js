@@ -1,37 +1,4 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -44,11 +11,60 @@ exports.mapGeminiToolsToOpenAI = mapGeminiToolsToOpenAI;
  * OpenAI/Ollama provider translator.
  * Handles Gemini ↔ OpenAI/Ollama request/response mapping and streaming chunks.
  */
-const path = __importStar(require("path"));
+const fs_1 = require("fs");
 const electron_log_1 = __importDefault(require("electron-log"));
+const images_1 = require("./images");
 const utils_1 = require("./utils");
 const shared_1 = require("../shared");
 // ─── REQUEST: Gemini → OpenAI ──────────────────────────────────────────────
+function mapUserContentParts(parts) {
+    const content = [];
+    for (const part of parts) {
+        const image = (0, images_1.getImageSource)(part);
+        if (image) {
+            content.push({
+                type: 'image_url',
+                image_url: { url: image.type === 'url' ? image.url : `data:${image.media_type};base64,${image.data}` },
+            });
+        }
+        else if (part.text) {
+            content.push({ type: 'text', text: part.text });
+        }
+        else if (part.fileData) {
+            const file = part.fileData;
+            let text = `[File reference: ${file.fileUri} (${file.mimeType})]`;
+            let url;
+            try {
+                url = new URL(file.fileUri);
+            }
+            catch {
+                // Preserve the existing reference fallback for non-image files.
+            }
+            if (url?.protocol === 'file:') {
+                const localPath = (0, images_1.localFilePath)(url);
+                try {
+                    text = `[File content from ${file.fileUri}]:\n${(0, fs_1.readFileSync)(localPath, 'utf-8')}`;
+                }
+                catch {
+                    // Preserve the reference fallback for unreadable local text files.
+                }
+            }
+            content.push({ type: 'text', text });
+        }
+        else if (part.inlineData) {
+            content.push({
+                type: 'text',
+                text: `[Inline data: ${part.inlineData.mimeType}, length: ${(part.inlineData.data || '').length} chars]`,
+            });
+        }
+    }
+    return content;
+}
+function compactContent(parts) {
+    return parts.some((part) => part.type === 'image_url')
+        ? parts
+        : parts.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
+}
 function mapGeminiToolsToOpenAI(geminiTools) {
     if (!geminiTools || !Array.isArray(geminiTools))
         return [];
@@ -74,14 +90,15 @@ function mapGeminiToolsToOpenAI(geminiTools) {
 function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
     const messages = [];
     const historyCallIds = new Map();
-    const pendingToolResponseTexts = [];
-    const flushToolResponseTexts = () => {
-        if (!pendingToolResponseTexts.length)
+    const pendingToolResponseContent = [];
+    const flushToolResponseContent = () => {
+        if (!pendingToolResponseContent.length)
             return;
-        messages.push({ role: 'user', content: pendingToolResponseTexts.join('\n') });
-        pendingToolResponseTexts.length = 0;
+        messages.push({ role: 'user', content: compactContent([...pendingToolResponseContent]) });
+        pendingToolResponseContent.length = 0;
     };
     if (geminiBody.systemInstruction && geminiBody.systemInstruction.parts) {
+        (0, images_1.assertUserImageParts)(geminiBody.systemInstruction.parts, 'system');
         const systemText = geminiBody.systemInstruction.parts.map((p) => p.text || '').join('');
         if (systemText) {
             messages.push({ role: 'system', content: systemText });
@@ -90,10 +107,11 @@ function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
     if (geminiBody.contents) {
         for (const item of geminiBody.contents) {
             if (item.parts) {
+                (0, images_1.assertUserImageParts)(item.parts, item.role || 'user');
                 const hasFunctionCall = item.parts.some((p) => p.functionCall);
                 const hasFunctionResponse = item.parts.some((p) => p.functionResponse);
                 if (!hasFunctionResponse)
-                    flushToolResponseTexts();
+                    flushToolResponseContent();
                 if (hasFunctionCall && item.role === 'model') {
                     const toolCalls = [];
                     for (const p of item.parts) {
@@ -127,8 +145,8 @@ function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
                 }
                 else if (hasFunctionResponse) {
                     for (const p of item.parts) {
-                        if (p.text && !p.thought)
-                            pendingToolResponseTexts.push(p.text);
+                        if (!p.thought)
+                            pendingToolResponseContent.push(...mapUserContentParts([p]));
                         if (p.functionResponse) {
                             const funcName = p.functionResponse.name || '';
                             const modelTCIds = shared_1.modelToolCallIds.get(stateKey) || {};
@@ -163,41 +181,7 @@ function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
                         reasoning_content = thoughtParts.map((p) => p.text || '').join('');
                     }
                     else {
-                        const parts = item.parts || [];
-                        const partsContent = [];
-                        for (const p of parts) {
-                            if (p.text) {
-                                partsContent.push(p.text);
-                            }
-                            else if (p.fileData) {
-                                const fd = p.fileData;
-                                // Try to read local files directly
-                                try {
-                                    const url = new URL(fd.fileUri);
-                                    if (url.protocol === 'file:') {
-                                        const fs = require('fs');
-                                        const fileContent = fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8');
-                                        partsContent.push(`[File content from ${fd.fileUri}]:\n${fileContent}`);
-                                    }
-                                    else {
-                                        partsContent.push(`[File reference: ${fd.fileUri} (${fd.mimeType})]`);
-                                    }
-                                }
-                                catch {
-                                    partsContent.push(`[File reference: ${fd.fileUri} (${fd.mimeType})]`);
-                                }
-                            }
-                            else if (p.inlineData) {
-                                const id = p.inlineData;
-                                if (id.mimeType && id.mimeType.startsWith('image/')) {
-                                    partsContent.push(`[Image: data:${id.mimeType};base64,${id.data}]`);
-                                }
-                                else {
-                                    partsContent.push(`[Inline data: ${id.mimeType}, length: ${(id.data || '').length} chars]`);
-                                }
-                            }
-                        }
-                        content = partsContent.join('\n');
+                        content = compactContent(mapUserContentParts(item.parts));
                     }
                     const msg = { role, content };
                     if (reasoning_content)
@@ -208,7 +192,7 @@ function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
         }
     }
     // Keep feedback after all consecutive tool results, including split parallel responses.
-    flushToolResponseTexts();
+    flushToolResponseContent();
     // Inject reasoning_content into assistant messages missing it
     let lastAssistantIdx = -1;
     for (let i = 0; i < messages.length; i++) {

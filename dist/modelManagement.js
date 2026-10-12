@@ -197,11 +197,9 @@ function parseModels(data, provider) {
         const maxOutputTokens = positiveLimit(item.maxOutputTokens, item.max_output_tokens, item.max_completion_tokens, item.outputTokenLimit, item.top_provider?.max_completion_tokens);
         const supportsVision = typeof item.supportsVision === 'boolean'
             ? item.supportsVision
-            : Array.isArray(item.architecture?.input_modalities)
-                ? item.architecture.input_modalities.includes('image')
-                : Array.isArray(item.inference_metadata?.request_modality)
-                    ? item.inference_metadata.request_modality.includes('Image')
-                    : undefined;
+            : [item.input_modalities, item.architecture?.input_modalities, item.inference_metadata?.request_modality]
+                .find(Array.isArray)
+                ?.some((value) => typeof value === 'string' && value.toLowerCase() === 'image');
         const supportsThinking = typeof item.supportsThinking === 'boolean'
             ? item.supportsThinking
             : Array.isArray(item.supported_parameters)

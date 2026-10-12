@@ -235,11 +235,9 @@ function parseModels(data: unknown, provider?: string): DiscoveredModel[] {
       const supportsVision =
         typeof item.supportsVision === 'boolean'
           ? item.supportsVision
-          : Array.isArray(item.architecture?.input_modalities)
-            ? item.architecture.input_modalities.includes('image')
-            : Array.isArray(item.inference_metadata?.request_modality)
-              ? item.inference_metadata.request_modality.includes('Image')
-              : undefined;
+          : [item.input_modalities, item.architecture?.input_modalities, item.inference_metadata?.request_modality]
+              .find(Array.isArray)
+              ?.some((value: unknown) => typeof value === 'string' && value.toLowerCase() === 'image');
       const supportsThinking =
         typeof item.supportsThinking === 'boolean'
           ? item.supportsThinking
