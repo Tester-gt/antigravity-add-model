@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createModelManager } from '../modelManagement';
+import { createModelActions } from '../modelActions';
 import * as path from 'node:path';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
@@ -97,6 +98,7 @@ function createFixture(customOnly = false) {
     path,
     'node:path': path,
     './modelManagement': { createModelManager },
+    './modelActions': { createModelActions },
     child_process: {},
     'electron-updater': { autoUpdater: {} },
     'electron-log/main': {},
@@ -252,6 +254,8 @@ describe('standalone custom model addon', () => {
       'storage:save-custom-model',
       'storage:delete-custom-model',
       'storage:test-model-connection',
+      'storage:test-model-generation',
+      'storage:create-effort-variants',
       'storage:get-provider-presets',
       'storage:discover-models',
       'storage:discover-local',
@@ -266,6 +270,8 @@ describe('standalone custom model addon', () => {
       'storage:google-login-cancel',
       'storage:google-test-account',
       'storage:google-pool-status',
+      'storage:get-diagnostics',
+      'storage:clear-diagnostics',
     ]);
     expect(fixture.exposed).toEqual({});
   });

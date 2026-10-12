@@ -57,6 +57,51 @@ afterEach(async () => {
 });
 
 describe('model storage and compatibility', () => {
+  it('creates explicit effort variants without changing existing models or exposing secrets', () => {
+    const { manager } = setup();
+    manager.saveModel({ ...entry, displayName: 'Reasoner', supportsThinking: true });
+    manager.saveModel({ ...entry, name: `${entry.name}-low`, externalModelName: 'keep-this' });
+    const original = manager.store.read()[0];
+    expect(manager.createEffortVariants(entry.name)).toEqual({ success: true, count: 3 });
+    const saved = manager.store.read();
+    expect(saved[0]).toEqual(original);
+    expect(saved[1].externalModelName).toBe('keep-this');
+    expect(saved.slice(2).map((model) => model.name)).toEqual([
+      `${entry.name}-low-2`,
+      `${entry.name}-medium`,
+      `${entry.name}-high`,
+    ]);
+    expect(saved.slice(2).map((model) => model.reasoningEffort)).toEqual(['low', 'medium', 'high']);
+    for (const model of saved.slice(2)) {
+      expect(model.apiKey).toBe(original.apiKey);
+      expect(model.customHeaders).toEqual(original.customHeaders);
+      expect(model.externalModelName).toBe(entry.externalModelName);
+    }
+    expect(JSON.stringify(manager.store.list())).not.toContain('private-');
+  });
+
+  it('creates valid Anthropic thinking budgets and rejects unsupported or too-small configurations before writing', () => {
+    const { manager } = setup();
+    manager.saveModel({ ...entry, provider: 'anthropic', maxOutputTokens: 4096, contextWindow: 32000 });
+    manager.createEffortVariants(entry.name);
+    expect(
+      manager.store
+        .read()
+        .slice(1)
+        .map((model) => [model.thinkingBudget, model.maxOutputTokens]),
+    ).toEqual([
+      [1024, 4096],
+      [4096, 5120],
+      [8192, 9216],
+    ]);
+    manager.saveModel({ ...entry, supportsThinking: false });
+    expect(() => manager.createEffortVariants(entry.name)).toThrow('without reasoning support');
+    manager.saveModel({ ...entry, provider: 'anthropic', maxOutputTokens: 4096, contextWindow: 8192 });
+    const before = manager.store.read();
+    expect(() => manager.createEffortVariants(entry.name)).toThrow('context window is too small');
+    expect(manager.store.read()).toEqual(before);
+  });
+
   it('imports DeepSeek input modalities and preserves negative metadata over name heuristics', async () => {
     const url = await server((_req, res) => {
       res.end(

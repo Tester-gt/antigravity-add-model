@@ -1,11 +1,20 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { safeStorage, app } = require('electron');
+const { safeStorage, app } = (() => {
+  try { return require('electron'); } catch { return {}; }
+})();
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes, createCipheriv, createDecipheriv } from 'crypto';
+import * as os from 'node:os';
+
+let credentialDirectory: string | undefined;
+/** Set before reading credentials when running the owned Node proxy service. */
+export function configureCredentialDirectory(directory: string): void {
+  credentialDirectory = path.resolve(directory);
+}
 
 function localKey(create: boolean): Buffer {
-  const directory = path.join(app.getPath('home'), '.gemini', 'antigravity');
+  const directory = credentialDirectory || path.join(app?.getPath('home') || os.homedir(), '.gemini', 'antigravity');
   const filename = path.join(directory, '.model-credentials-key');
   if (create && !fs.existsSync(filename)) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -102,7 +111,7 @@ export function decryptString(encryptedText: string): string {
       }
     } else {
       console.error(
-        '[CryptoStore] safeStorage is unavailable, but data was encrypted with it. Trying fallback raw data.',
+        '[CryptoStore] OS-encrypted credentials are unavailable in this runtime. Re-enter them in its model manager.',
       );
       return 'DECRYPTION_FAILED_STORAGE_UNAVAILABLE';
     }

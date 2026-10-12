@@ -1,3 +1,5 @@
+/** Set before reading credentials when running the owned Node proxy service. */
+export declare function configureCredentialDirectory(directory: string): void;
 /**
  * Creates a backup of the specified file with a .bak extension.
  */

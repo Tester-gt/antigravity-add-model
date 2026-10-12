@@ -153,17 +153,60 @@ Each account has a unique stable `id`, optional `label`, `enabled`, `project`,
 milliseconds). Up to 50 accounts are supported. Keep the ID unchanged when
 editing masked credentials. Account `project` overrides `googleProject` when set.
 
-`googlePool.strategy` accepts `round-robin`, `least-loaded`, or `quota`.
-Remaining-quota selection uses the latest retrieved snapshot. Conversation
+`googlePool.strategy` accepts `round-robin`, `least-loaded`, `quota`, or `adaptive`.
+Adaptive selection compares two eligible candidates using measured time to
+response headers, in-flight load, recent failures and fresh known quota. Pool
+status exposes request/success/failure counts and measured latency. Measurements
+and quota snapshots become stale after ten minutes; unknown values remain unknown.
+Remaining-quota selection uses the latest fresh retrieved snapshot. Conversation
 affinity can retain an eligible account. `maxConcurrency` is per account
 (`1`–`100`, default `2`); `cooldownMs` defaults to `60000` and accepts
 `1`–`3600000`. Access tokens refresh as needed; failed authorization and
 cooldown/concurrency state can temporarily make an account unavailable.
 
+Structured Google `RetryInfo` / `ErrorInfo` hints and `Retry-After` take precedence
+over the configured cooldown (bounded to 31 days). Cooldowns use the upstream
+model ID, so local effort variants share the same limit. A cooldown does not
+block a different upstream model using that account; authentication failures and
+concurrency capacity remain account-wide. A quota snapshot disables an account
+globally only when all returned fresh buckets explicitly report zero. One empty
+Claude bucket must not disable a positive Gemini bucket. No refill time is guessed.
+
 No third-party OAuth client credentials are bundled, and no browser/IDE/gcloud
 credentials are automatically extracted. Successful OAuth does not grant Cloud
 Code entitlement, model access, or quota. Supply an eligible account/project;
 Google's location and service-access decisions remain in effect.
+
+## Effort variants and recent models
+
+Choose **Effort variants** on a saved model to review and create low/medium/high
+copies. OpenAI-compatible models receive `reasoningEffort`; other formats also
+receive thinking budgets of 1024/4096/8192 and sufficient output budgets. Confirm
+your provider supports these values. The source model stays unchanged, name
+collisions get numbered suffixes, and saved credentials are copied privately.
+No provider request occurs when creating variants.
+
+The model manager orders recently successful models first within its grouping.
+This history is process-local and excludes generation tests. It does not change
+native IDE picker ordering or the stored model identities.
+
+## Direct-proxy diagnostics and generation tests
+
+Open **Diagnostics** in the desktop addon or IDE browser manager to inspect up
+to 200 recent requests, status, elapsed time and provider-reported input/output/
+cached tokens. Missing usage is shown as unknown. Totals cover this bounded
+in-memory window, not billing history; restarting or clearing diagnostics removes
+it. Usage belongs to the final attempted model; earlier failed retry/fallback
+attempts are excluded from token totals. Elapsed time covers the whole request.
+Prompt text, response text, request URLs and credentials are not retained.
+
+**Test generation (uses quota)** in the model editor sends the fixed prompt
+`Reply with OK.` with a 32-token output budget, a 30-second limit, no tools,
+retries or fallback models. It exercises the same request translation as normal
+chat and reports whether generated text was received. Some reasoning models need
+a larger minimum output budget and can fail this small test despite being usable.
+**Test connection** still checks the provider's catalog/authentication without
+requesting generation.
 
 ## Credentials and data
 

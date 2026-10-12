@@ -1,3 +1,4 @@
+import type { GoogleCooldownReason } from './googlePoolPolicy';
 export interface GoogleAccount {
     id: string;
     label?: string;
@@ -10,7 +11,7 @@ export interface GoogleAccount {
     enabled?: boolean;
 }
 export interface GooglePoolOptions {
-    strategy?: 'round-robin' | 'least-loaded' | 'quota';
+    strategy?: 'round-robin' | 'least-loaded' | 'quota' | 'adaptive';
     maxConcurrency?: number;
     cooldownMs?: number;
 }
@@ -29,6 +30,9 @@ export interface GoogleAccountLease {
     release(result?: {
         status?: number;
         retryAfterMs?: number;
+        cooldownReason?: GoogleCooldownReason;
+        latencyMs?: number;
+        cancelled?: boolean;
     }): void;
 }
 export declare class GoogleAccountError extends Error {
@@ -46,13 +50,26 @@ export declare function fetchGoogleModels(account: GoogleAccount, baseURL?: stri
     id: string;
     displayName: string;
 }[]>;
-export declare function acquireGoogleAccount(modelName: string, accounts: GoogleAccount[], options?: GooglePoolOptions, requestIdentity?: string): Promise<GoogleAccountLease>;
+export declare function acquireGoogleAccount(modelName: string, accounts: GoogleAccount[], options?: GooglePoolOptions, requestIdentity?: string, cooldownScope?: string): Promise<GoogleAccountLease>;
 export declare function getGooglePoolStatus(): {
     id: string;
     label: string;
     inFlight: number;
     status: string;
     cooldownUntil: number;
+    modelCooldowns: {
+        modelName: string;
+        cooldownUntil: number;
+        reason: GoogleCooldownReason;
+    }[];
+    requests: number;
+    succeeded: number;
+    failed: number;
+    avgLatencyMs: number;
+    lastStatus: number;
+    quotaAgeMs: number;
+    quotaFresh: boolean;
+    quotaExhausted: boolean;
     quota: GoogleQuotaSnapshot;
 }[];
 /** Clear volatile account state after explicit account edits or sign-in. */

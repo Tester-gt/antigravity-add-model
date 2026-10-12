@@ -62,6 +62,8 @@ function startCleanupInterval() {
             }
         }
     }, 300000);
+    // Importing translator/model-management helpers must not keep a CLI process alive.
+    cleanupInterval.unref?.();
 }
 function stopCleanupInterval() {
     if (cleanupInterval) {

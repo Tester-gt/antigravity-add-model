@@ -214,7 +214,7 @@ function validateCustomModel(model) {
         if (!m.googlePool || typeof m.googlePool !== 'object' || Array.isArray(m.googlePool))
             return { valid: false, error: 'googlePool must be an object' };
         const options = m.googlePool;
-        if (options.strategy !== undefined && !['round-robin', 'least-loaded', 'quota'].includes(options.strategy))
+        if (options.strategy !== undefined && !['round-robin', 'least-loaded', 'quota', 'adaptive'].includes(options.strategy))
             return { valid: false, error: 'Invalid Google pool strategy' };
         for (const field of ['maxConcurrency', 'cooldownMs']) {
             const maximum = field === 'maxConcurrency' ? 100 : 3600000;

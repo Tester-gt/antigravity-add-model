@@ -74,6 +74,29 @@ async function fixture(
       success: true,
       message: 'Model listing verified. Generation was not tested.',
     }),
+    'storage:test-model-generation': () => ({ success: true, message: 'Generation succeeded (HTTP 200, 12 ms).' }),
+    'storage:create-effort-variants': () => ({ success: true, count: 3 }),
+    'storage:get-diagnostics': () => ({
+      success: true,
+      active: 0,
+      capacity: 200,
+      summary: { requests: 1, succeeded: 1, failed: 0, cancelled: 0, measuredRequests: 0 },
+      recentModels: ['models/primary'],
+      requests: [
+        {
+          id: 'test',
+          timestamp: Date.now(),
+          model: '<script>bad()</script>',
+          provider: 'openai',
+          outcome: 'succeeded',
+          status: 200,
+          latencyMs: 12,
+          stream: false,
+          kind: 'request',
+        },
+      ],
+    }),
+    'storage:clear-diagnostics': () => ({ success: true }),
     'storage:discover-models': () => ({
       success: true,
       models: [
@@ -156,6 +179,55 @@ async function fixture(
 }
 
 describe('custom model settings in the preserved vendor preload', () => {
+  it('shows diagnostics with unknown usage and escapes model names in filtered history and export', async () => {
+    const f = await fixture();
+    await f.click('Diagnostics');
+    expect(f.document.getElementById('agy-diagnostics-summary')!.textContent).toContain('Token usage: unknown');
+    expect(f.document.getElementById('agy-diagnostics-requests')!.textContent).toContain('<script>bad()</script>');
+    expect(f.document.querySelector('#agy-modal-overlay script')).toBeNull();
+    const search = f.input('agy-diagnostics-search', 'missing');
+    search.dispatchEvent(new f.dom.window.Event('input', { bubbles: true }));
+    expect(f.document.getElementById('agy-diagnostics-requests')!.textContent).toContain('No matching requests');
+    await f.click('Export diagnostics');
+    expect((f.document.getElementById('agy-diagnostics-export') as HTMLTextAreaElement).value).toContain(
+      '"capacity": 200',
+    );
+    await f.click('Clear diagnostic history');
+    expect(f.invoke).toHaveBeenCalledWith('storage:clear-diagnostics');
+  });
+
+  it('runs generation only after the user chooses the charge-labelled test flow', async () => {
+    const f = await fixture();
+    await f.click('Test generation');
+    expect(f.document.getElementById('agy-modal-card')!.textContent).toContain('may charge');
+    expect(f.invoke).not.toHaveBeenCalledWith('storage:test-model-generation', expect.anything());
+    await f.click('Run generation test');
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:test-model-generation',
+      expect.objectContaining({ name: model.name, apiKey: '********' }),
+    );
+    expect(f.document.getElementById('agy-modal-card')!.textContent).toContain('Generation succeeded');
+  });
+
+  it('creates reasoning variants only after showing their budgets', async () => {
+    const f = await fixture();
+    await f.click('Effort variants');
+    expect(f.document.getElementById('agy-modal-card')!.textContent).toContain('8,192');
+    expect(f.invoke).not.toHaveBeenCalledWith('storage:create-effort-variants', model.name);
+    await f.click('Create three variants');
+    expect(f.invoke).toHaveBeenCalledWith('storage:create-effort-variants', model.name);
+  });
+
+  it('offers adaptive account selection without changing an existing strategy', async () => {
+    const f = await fixture(undefined, [
+      { ...model, provider: 'google-cloudcode', googlePool: { strategy: 'quota' }, googleAccounts: [] },
+    ]);
+    await f.click('Edit');
+    const strategy = f.document.getElementById('agy-google-pool-strategy') as HTMLSelectElement;
+    expect(strategy.value).toBe('quota');
+    expect(Array.from(strategy.options).map((option) => option.value)).toContain('adaptive');
+  });
+
   it('mounts under a div-based Models & Usage heading without a text Refresh button', async () => {
     const f = await fixture(
       '<nav><button><span>Models &amp; Usage</span></button></nav><main class="overflow-y-auto"><div id="settings"><div><span>Models &amp; Usage</span><button aria-label="Refresh quota"></button></div></div></main>',

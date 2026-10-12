@@ -89,6 +89,8 @@ export function startCleanupInterval(): void {
       }
     }
   }, 300_000);
+  // Importing translator/model-management helpers must not keep a CLI process alive.
+  cleanupInterval.unref?.();
 }
 
 export function stopCleanupInterval(): void {

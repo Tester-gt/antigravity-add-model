@@ -48,13 +48,14 @@ const http = __importStar(require("http"));
 const https = __importStar(require("https"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
-const electron_1 = require("electron");
 const electron_log_1 = __importDefault(require("electron-log"));
 // ─── Imports ──────────────────────────────────────────────────────────────
 let server = null;
 let proxyPort = 0;
 let startingProxy = null;
 let stoppingProxy = null;
+let serviceDataDirectory;
+let shutdownGraceMs;
 // Shared cross-turn state
 const shared_1 = require("./proxy/shared");
 // Model configuration & capability detection
@@ -78,7 +79,7 @@ function generateModelPlaceholderId(model) {
     return `MODEL_PLACEHOLDER_M${placeholderNum}`;
 }
 function getCustomModelsPath() {
-    const geminiDir = path.join(electron_1.app.getPath('home'), '.gemini', 'antigravity');
+    const geminiDir = serviceDataDirectory || path.join(require('electron').app.getPath('home'), '.gemini', 'antigravity');
     return path.join(geminiDir, 'custom_models.json');
 }
 function toSlug(model) {
@@ -1093,15 +1094,23 @@ function handleRequest(req, res) {
     });
 }
 // ─── Server Start/Stop ────────────────────────────────────────────────────
-async function startProxy() {
+async function startProxy(options = {}) {
     if (stoppingProxy)
         await stoppingProxy;
     if (server?.listening && proxyPort)
         return proxyPort;
     if (startingProxy)
         return startingProxy;
-    const requiredPort = (0, listen_1.getRequiredProxyPort)(electron_1.app.getAppPath());
-    const newServer = http.createServer(handleRequest);
+    if (options.port !== undefined && (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)) {
+        throw new Error('Proxy port must be an integer between 1 and 65535');
+    }
+    serviceDataDirectory = options.dataDirectory ? path.resolve(options.dataDirectory) : undefined;
+    shutdownGraceMs = options.shutdownGraceMs;
+    const requiredPort = options.port ?? (0, listen_1.getRequiredProxyPort)(require('electron').app.getAppPath());
+    const newServer = http.createServer((req, res) => {
+        if (!options.handleManagement?.(req, res))
+            handleRequest(req, res);
+    });
     server = newServer;
     (0, shared_1.startCleanupInterval)();
     startingProxy = (0, listen_1.listenProxy)(newServer, requiredPort ?? 50999, requiredPort === undefined)
@@ -1139,7 +1148,11 @@ function stopProxy() {
         (0, customRequest_1.stopCustomRequests)();
         if (server) {
             const closingServer = server;
-            await new Promise((resolve) => closingServer.close(() => resolve()));
+            await new Promise((resolve) => {
+                const timer = shutdownGraceMs === undefined ? undefined : setTimeout(() => closingServer.closeAllConnections(), shutdownGraceMs);
+                timer?.unref?.();
+                closingServer.close(() => { clearTimeout(timer); resolve(); });
+            });
             electron_log_1.default.info('[Proxy] Server stopped');
         }
         server = null;

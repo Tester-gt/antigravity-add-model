@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.configureCredentialDirectory = configureCredentialDirectory;
 exports.backupFile = backupFile;
 exports.isEncryptionAvailable = isEncryptionAvailable;
 exports.encryptString = encryptString;
@@ -40,12 +41,25 @@ exports.decryptString = decryptString;
 exports.encryptModels = encryptModels;
 exports.decryptModels = decryptModels;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { safeStorage, app } = require('electron');
+const { safeStorage, app } = (() => {
+    try {
+        return require('electron');
+    }
+    catch {
+        return {};
+    }
+})();
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto_1 = require("crypto");
+const os = __importStar(require("node:os"));
+let credentialDirectory;
+/** Set before reading credentials when running the owned Node proxy service. */
+function configureCredentialDirectory(directory) {
+    credentialDirectory = path.resolve(directory);
+}
 function localKey(create) {
-    const directory = path.join(app.getPath('home'), '.gemini', 'antigravity');
+    const directory = credentialDirectory || path.join(app?.getPath('home') || os.homedir(), '.gemini', 'antigravity');
     const filename = path.join(directory, '.model-credentials-key');
     if (create && !fs.existsSync(filename)) {
         fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -146,7 +160,7 @@ function decryptString(encryptedText) {
             }
         }
         else {
-            console.error('[CryptoStore] safeStorage is unavailable, but data was encrypted with it. Trying fallback raw data.');
+            console.error('[CryptoStore] OS-encrypted credentials are unavailable in this runtime. Re-enter them in its model manager.');
             return 'DECRYPTION_FAILED_STORAGE_UNAVAILABLE';
         }
     }

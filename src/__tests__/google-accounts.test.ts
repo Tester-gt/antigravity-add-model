@@ -13,6 +13,7 @@ import {
 
 const servers: http.Server[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   configureGoogleAccountPersistence(undefined);
   resetGoogleAccountState();
   await Promise.all(
@@ -190,7 +191,13 @@ describe('Google account selection and quota', () => {
       const fraction = req.headers.authorization === 'Bearer access-quota-a' ? 0.2 : 0.8;
       res.end(
         JSON.stringify({
-          groups: [{ buckets: [{ bucketId: '5h', remainingFraction: fraction, resetTime: '2026-10-01T00:00:00Z' }] }],
+          groups: [
+            {
+              buckets: [
+                { bucketId: '5h', remainingFraction: fraction, resetTime: new Date(Date.now() + 60_000).toISOString() },
+              ],
+            },
+          ],
         }),
       );
     });
@@ -204,5 +211,151 @@ describe('Google account selection and quota', () => {
     expect(result.remainingFraction).toBeUndefined();
     expect(result.buckets).toEqual([]);
     await expect(fetchGoogleQuota(account('bad-host'), 'https://example.com')).rejects.toThrow(/official service/);
+  });
+
+  it('selects between two eligible accounts using measured latency and preserves conversation affinity', async () => {
+    const accounts = [account('slow'), account('fast')];
+    const slow = await acquireGoogleAccount('models/test', [accounts[0]]);
+    slow.release({ status: 200, latencyMs: 5000 });
+    slow.release({ status: 500 }); // A lease can only be released once.
+    const fast = await acquireGoogleAccount('models/test', [accounts[1]]);
+    fast.release({ status: 200, latencyMs: 100 });
+    const selected = await acquireGoogleAccount('models/test', accounts, { strategy: 'adaptive' });
+    expect(selected.account.id).toBe('fast');
+    selected.release({ status: 200, latencyMs: 200 });
+    expect(getGooglePoolStatus()).toContainEqual(
+      expect.objectContaining({
+        id: 'fast',
+        requests: 2,
+        succeeded: 2,
+        failed: 0,
+        avgLatencyMs: 120,
+        lastStatus: 200,
+      }),
+    );
+    const affinity = await acquireGoogleAccount('models/test', [accounts[0]], {}, 'same-conversation');
+    affinity.release({ status: 200 });
+    const sticky = await acquireGoogleAccount('models/test', accounts, { strategy: 'adaptive' }, 'same-conversation');
+    expect(sticky.account.id).toBe('slow');
+    sticky.release();
+    expect(JSON.stringify(getGooglePoolStatus())).not.toContain('access-');
+  });
+
+  it('keeps capacity limits above adaptive preference and forgets stale latency measurements', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const accounts = [account('busy-fast'), account('idle')];
+    const measured = await acquireGoogleAccount('models/test', [accounts[0]]);
+    measured.release({ status: 200, latencyMs: 25 });
+    const busy = await acquireGoogleAccount('models/test', [accounts[0]], { maxConcurrency: 1 });
+    const other = await acquireGoogleAccount('models/test', accounts, { strategy: 'adaptive', maxConcurrency: 1 });
+    expect(other.account.id).toBe('idle');
+    busy.release({ cancelled: true, status: 502 });
+    other.release();
+    expect(getGooglePoolStatus().find((state) => state.id === 'busy-fast')?.failed).toBe(0);
+    clock.mockReturnValue(now + 10 * 60_000);
+    expect(getGooglePoolStatus().find((state) => state.id === 'busy-fast')?.avgLatencyMs).toBeUndefined();
+  });
+
+  it('scopes cooldowns to a model and honors server delays without replacing them with the configured floor', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const accounts = [account('shared-limit')];
+    const limited = await acquireGoogleAccount('models/claude', accounts, { cooldownMs: 60_000 });
+    limited.release({ status: 429, retryAfterMs: 2000, cooldownReason: 'rate-limited' });
+    await expect(acquireGoogleAccount('models/claude', accounts)).rejects.toThrow(/cooldown/);
+    const otherModel = await acquireGoogleAccount('models/gemini', accounts);
+    otherModel.release({ status: 200 });
+    expect(getGooglePoolStatus()[0]).toMatchObject({
+      failed: 1,
+      succeeded: 1,
+      modelCooldowns: [{ modelName: 'models/claude', cooldownUntil: now + 2000, reason: 'rate-limited' }],
+    });
+    clock.mockReturnValue(now + 2001);
+    const resumed = await acquireGoogleAccount('models/claude', accounts);
+    resumed.release();
+    expect(getGooglePoolStatus()[0].status).toBe('ready');
+  });
+
+  it('excludes only fresh entirely exhausted quota and reconsiders it after reset or refresh', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    let buckets: Array<Record<string, unknown>> = [
+      { bucketId: 'all', remainingFraction: 0, resetTime: new Date(now + 1000).toISOString() },
+    ];
+    const endpoint = await serve((_req, res) => res.end(JSON.stringify({ buckets })));
+    const entry = account('quota-zero');
+    await fetchGoogleQuota(entry, endpoint);
+    await expect(acquireGoogleAccount('models/test', [entry])).rejects.toThrow(/quota/);
+    expect(getGooglePoolStatus()[0]).toMatchObject({
+      status: 'quota-exhausted',
+      quotaFresh: true,
+      quotaExhausted: true,
+    });
+    clock.mockReturnValue(now + 1001);
+    const reset = await acquireGoogleAccount('models/test', [entry]);
+    reset.release();
+    expect(getGooglePoolStatus()[0].quotaFresh).toBe(false);
+    buckets = [
+      { bucketId: 'claude', remainingFraction: 0 },
+      { bucketId: 'gemini', remainingFraction: 0.8 },
+    ];
+    await fetchGoogleQuota(entry, endpoint);
+    const mixed = await acquireGoogleAccount('models/test', [entry]);
+    mixed.release();
+    expect(getGooglePoolStatus()[0].quotaExhausted).toBe(false);
+    buckets = [{ bucketId: 'claude', remainingFraction: 0 }, { bucketId: 'unknown' }];
+    await fetchGoogleQuota(entry, endpoint);
+    const unknown = await acquireGoogleAccount('models/test', [entry]);
+    unknown.release();
+    buckets = [{ bucketId: 'all', remainingFraction: 0 }];
+    await fetchGoogleQuota(entry, endpoint);
+    clock.mockReturnValue(now + 11 * 60_000);
+    const stale = await acquireGoogleAccount('models/test', [entry]);
+    stale.release();
+    expect(getGooglePoolStatus()[0]).toMatchObject({ quotaFresh: false, quotaExhausted: false });
+  });
+
+  it('does not shorten an existing quota cooldown when a concurrent request reports a shorter burst limit', async () => {
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const accounts = [account('concurrent')];
+    const first = await acquireGoogleAccount('models/test', accounts);
+    const second = await acquireGoogleAccount('models/test', accounts);
+    first.release({ status: 429, retryAfterMs: 3_600_000, cooldownReason: 'quota-exhausted' });
+    second.release({ status: 429, retryAfterMs: 1000, cooldownReason: 'rate-limited' });
+    expect(getGooglePoolStatus()[0]).toMatchObject({
+      failed: 2,
+      inFlight: 0,
+      modelCooldowns: [{ modelName: 'models/test', cooldownUntil: now + 3_600_000, reason: 'quota-exhausted' }],
+    });
+  });
+
+  it('shares an upstream model cooldown across local effort aliases while keeping other upstream models eligible', async () => {
+    const accounts = [account('aliases')];
+    const first = await acquireGoogleAccount('models/local-low', accounts, {}, 'conversation', 'gemini-pro');
+    first.release({ status: 429, retryAfterMs: 60_000 });
+    await expect(acquireGoogleAccount('models/local-high', accounts, {}, 'conversation', 'gemini-pro')).rejects.toThrow(
+      /cooldown/,
+    );
+    const different = await acquireGoogleAccount('models/local-flash', accounts, {}, 'conversation', 'gemini-flash');
+    different.release({ status: 200 });
+    expect(getGooglePoolStatus()[0].modelCooldowns[0].modelName).toBe('gemini-pro');
+  });
+
+  it('uses measured failures in adaptive selection without making an unsuccessful account permanently ineligible', async () => {
+    const accounts = [account('failed'), account('healthy')];
+    const first = await acquireGoogleAccount('models/test', [accounts[0]]);
+    first.release({ status: 400 });
+    const preferred = await acquireGoogleAccount('models/test', accounts, { strategy: 'adaptive' });
+    expect(preferred.account.id).toBe('healthy');
+    preferred.release({ status: 200 });
+    const recovered = await acquireGoogleAccount('models/test', [accounts[0]], { strategy: 'adaptive' });
+    recovered.release({ status: 200 });
+    expect(getGooglePoolStatus().find((state) => state.id === 'failed')).toMatchObject({
+      failed: 1,
+      succeeded: 1,
+      status: 'ready',
+    });
   });
 });

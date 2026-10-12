@@ -205,7 +205,7 @@ export function validateCustomModel(model: unknown): ValidationResult {
   if (m.googlePool !== undefined) {
     if (!m.googlePool || typeof m.googlePool !== 'object' || Array.isArray(m.googlePool)) return { valid: false, error: 'googlePool must be an object' };
     const options = m.googlePool as Record<string, unknown>;
-    if (options.strategy !== undefined && !['round-robin', 'least-loaded', 'quota'].includes(options.strategy as string)) return { valid: false, error: 'Invalid Google pool strategy' };
+    if (options.strategy !== undefined && !['round-robin', 'least-loaded', 'quota', 'adaptive'].includes(options.strategy as string)) return { valid: false, error: 'Invalid Google pool strategy' };
     for (const field of ['maxConcurrency', 'cooldownMs']) {
       const maximum = field === 'maxConcurrency' ? 100 : 3_600_000;
       if (options[field] !== undefined && (!Number.isSafeInteger(options[field]) || Number(options[field]) < 1 || Number(options[field]) > maximum)) return { valid: false, error: `googlePool.${field} must be a positive integer up to ${maximum}` };

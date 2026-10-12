@@ -14,16 +14,19 @@ archive with an `out/main.js` entry point), a VS Code workbench, and a different
 language-server integration. Copying this project's `dist` directory into it
 does not load the proxy or add a settings dashboard. The installer detects that
 layout and exits with `NOT_SUPPORTED` before modifying application files.
-[Issue #2](https://github.com/vahapogut/antigravity-add-model/issues/2) remains the
-tracking issue for an actual IDE adapter. macOS IDE 2.1.1 support has not been
-implemented or validated.
+Use the separate [experimental IDE adapter](ide.md): it validates the IDE's
+declared `jetski.cloudCodeUrl` setting, backs up and changes user settings, and
+launches an owned Node proxy before the IDE. It includes a local web model manager.
+Native IDE picker behavior, including macOS IDE 2.1.1, has not been validated in
+a live signed-in IDE. [Issue #2](https://github.com/vahapogut/antigravity-add-model/issues/2)
+remains relevant to that validation.
 
 | Installation | Current behavior |
 | --- | --- |
 | Standalone Electron `app.asar`, entry `dist/main.js` | Validated runtime hooks; vendor APIs, certificate handling, updater and window code are retained |
 | Standalone Windows app connected to WSL | Vendor WSL behavior is retained; custom-model proxy routing applies only to local sessions |
-| Unpacked IDE `app/out`, including macOS `Antigravity IDE.app` | Refused without changing the application |
-| Archived IDE with an `out/main.js` entry point | Refused without changing the application |
+| Unpacked IDE `app/out` with a declared `jetski.cloudCodeUrl` setting | Experimental `ide:apply`/`ide:launch` adapter; standalone installer still refuses this layout |
+| Archived IDE with an `out/main.js` entry point | Unsupported; refused without changing the application |
 | Missing or unrecognized application layout | Explicit error; no success message |
 
 A matching layout and version number are not a guarantee of compatibility with

@@ -11,6 +11,7 @@ import { getProviderHeaders, getProviderUrl, getTranslator, translateRequest } f
 import { getProvider, PROVIDERS, resolveApiFormat } from '../providers';
 import { validateCustomModel } from '../schemaValidator';
 import { getGooglePoolStatus, resetGoogleAccountState } from '../googleAccounts';
+import { clearDiagnostics, getDiagnostics } from '../diagnostics';
 
 vi.mock('electron-log', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 const servers: http.Server[] = [];
@@ -745,6 +746,39 @@ describe('real upstream HTTP routing', () => {
     expect(buildFallbackChain(primary, [primary, disabled, backup])).toEqual([primary, backup]);
   });
 
+  it('does not attribute usage from a failed stream to the fallback provider', async () => {
+    clearDiagnostics();
+    const empty = await serve((_req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      sse(res, {
+        type: 'message_start',
+        message: { usage: { input_tokens: 100, cache_read_input_tokens: 60, output_tokens: 1 } },
+      });
+      sse(res, { type: 'message_stop' });
+      res.end();
+    });
+    const ready = await serve((_req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      sse(res, {
+        choices: [{ delta: { content: 'fallback reply' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 12, completion_tokens: 2 },
+      });
+      res.end();
+    });
+    const backup = model(ready);
+    const primary = model(empty, { provider: 'anthropic', fallbackModels: [backup.name] });
+    expect(await (await fetch(await proxy([primary, backup], true))).text()).toContain('fallback reply');
+    const record = getDiagnostics().requests[0];
+    expect(record).toMatchObject({
+      model: backup.name,
+      provider: 'openai',
+      outcome: 'succeeded',
+      inputTokens: 12,
+      outputTokens: 2,
+    });
+    expect(record).not.toHaveProperty('cachedTokens');
+  });
+
   it('does not retry invalid caller requests or run a fallback for HTTP 400', async () => {
     let attempts = 0;
     const upstream = await serve((_req, res) => {
@@ -1073,6 +1107,117 @@ describe('real upstream HTTP routing', () => {
     expect(getGooglePoolStatus()).toContainEqual(expect.objectContaining({ id: 'forbidden', status: 'forbidden' }));
   });
 
+  it('uses structured Google retry hints, records measured account health and never exposes upstream secrets', async () => {
+    const started = Date.now();
+    const upstream = await serve((req, res) => {
+      if (req.headers.authorization === 'Bearer short-burst') {
+        res.writeHead(429);
+        res.end(
+          JSON.stringify({
+            error: {
+              message: 'sensitive echoed prompt and credential',
+              details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '2s' }],
+            },
+          }),
+        );
+      } else
+        res.end(
+          JSON.stringify({ response: { candidates: [{ content: { role: 'model', parts: [{ text: 'healthy' }] } }] } }),
+        );
+    });
+    const url = await proxy([
+      model(upstream, {
+        provider: 'google-cloudcode',
+        googlePool: { cooldownMs: 60_000 },
+        googleAccounts: [
+          { id: 'short-burst', accessToken: 'short-burst' },
+          { id: 'healthy', accessToken: 'healthy' },
+        ],
+      }),
+    ]);
+    const response = await fetch(url);
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain('sensitive');
+    const limited = getGooglePoolStatus().find((state) => state.id === 'short-burst')!;
+    expect(limited.cooldownUntil).toBeGreaterThanOrEqual(started + 2000);
+    expect(limited.cooldownUntil).toBeLessThanOrEqual(Date.now() + 2000);
+    expect(limited).toMatchObject({
+      requests: 1,
+      failed: 1,
+      lastStatus: 429,
+      modelCooldowns: [expect.objectContaining({ reason: 'rate-limited' })],
+    });
+    expect(getGooglePoolStatus()).toContainEqual(
+      expect.objectContaining({ id: 'healthy', succeeded: 1, failed: 0, avgLatencyMs: expect.any(Number) }),
+    );
+    expect(JSON.stringify(getGooglePoolStatus())).not.toContain('sensitive');
+  });
+
+  it('does not bypass an upstream account cooldown by switching to a local effort alias', async () => {
+    const requested: string[] = [];
+    const upstream = await serve(async (req, res) => {
+      const payload = await body(req);
+      requested.push(payload.model);
+      if (payload.model === 'gemini-pro') {
+        res.writeHead(429);
+        res.end('{}');
+      } else
+        res.end(
+          JSON.stringify({
+            response: { candidates: [{ content: { role: 'model', parts: [{ text: 'flash reply' }] } }] },
+          }),
+        );
+    });
+    const account = { id: 'effort-alias-account', accessToken: 'fixture' };
+    const high = model(upstream, {
+      provider: 'google-cloudcode',
+      externalModelName: 'gemini-pro',
+      googleAccounts: [account],
+    });
+    const flash = model(upstream, {
+      provider: 'google-cloudcode',
+      externalModelName: 'gemini-flash',
+      googleAccounts: [account],
+    });
+    const low = model(upstream, {
+      provider: 'google-cloudcode',
+      externalModelName: 'gemini-pro',
+      googleAccounts: [account],
+      fallbackModels: [high.name, flash.name],
+    });
+    expect(await (await fetch(await proxy([low, high, flash]))).text()).toContain('flash reply');
+    expect(requested).toEqual(['gemini-pro', 'gemini-flash']);
+  });
+
+  it('does not rotate Google accounts for an explicit generation test', async () => {
+    let calls = 0;
+    const upstream = await serve((_req, res) => {
+      calls++;
+      res.writeHead(429);
+      res.end('{}');
+    });
+    const candidate = model(upstream, {
+      provider: 'google-cloudcode',
+      googleAccounts: [
+        { id: 'first-test', accessToken: 'first-test' },
+        { id: 'second-test', accessToken: 'second-test' },
+      ],
+    });
+    const url = await serve((_req, res) => {
+      void runCustomModelRequest(
+        res,
+        candidate,
+        { contents: [{ role: 'user', parts: [{ text: 'ping' }] }] },
+        false,
+        [candidate],
+        false,
+        'generation-test',
+      );
+    });
+    expect((await fetch(url)).status).toBe(429);
+    expect(calls).toBe(1);
+  });
+
   it('keeps one Google account for the entire stream and never switches after a partial response', async () => {
     const captured: string[] = [];
     const upstream = await serve((req, res) => {
@@ -1104,6 +1249,14 @@ describe('real upstream HTTP routing', () => {
 });
 
 describe('provider and configuration contracts', () => {
+  it('accepts the adaptive Google pool strategy and rejects misspelled strategies', () => {
+    const config = model('https://daily-cloudcode-pa.googleapis.com', {
+      provider: 'google-cloudcode',
+      googlePool: { strategy: 'adaptive' },
+    });
+    expect(validateCustomModel(config).valid).toBe(true);
+    expect(validateCustomModel({ ...config, googlePool: { strategy: 'adpative' } }).valid).toBe(false);
+  });
   it('rejects embedded URL credentials before saving or routing a model', () => {
     expect(validateCustomModel(model('https://user:secret@example.com/v1')).valid).toBe(false);
     expect(validateCustomModel(model('https://user@example.com/v1')).valid).toBe(false);

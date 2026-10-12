@@ -10,7 +10,7 @@ hosted cloud agents, and a remote computer-control daemon are separate products.
 | Reference | Pinned revision | Source license | Integration approach |
 | --- | --- | --- | --- |
 | [12errh/antigravity-proxy](https://github.com/12errh/antigravity-proxy/tree/457d0490ffdca79cce99b4c0acfb059aa83426b9) | `457d0490ffdca79cce99b4c0acfb059aa83426b9` | MIT | Adapt routing, provider, dashboard, history, context, and utility components into the optional gateway; retain [upstream notices](../gateway/UPSTREAM.md). |
-| [Aminetwiti/antigravity-patch-proxy-remote](https://github.com/Aminetwiti/antigravity-patch-proxy-remote/tree/662e5a4a48f02ba541e324b3d35b286ce1e9823e) | `662e5a4a48f02ba541e324b3d35b286ce1e9823e` | Apache-2.0 | Read model/proxy/Doctor/OAuth source to identify desktop features; implement them through this project's existing addon rather than replacing its installed runtime. |
+| [Aminetwiti/antigravity-patch-proxy-remote](https://github.com/Aminetwiti/antigravity-patch-proxy-remote/tree/6cab300c4250621536d0bf048a17f69043587068) | `6cab300c4250621536d0bf048a17f69043587068` (v3.7.3) | Apache-2.0 | Source comparison informed independently implemented IDE settings/lifecycle, direct diagnostics and pool policy. No vendor bundle, OAuth credentials, remote daemon or Doctor app is copied. |
 
 Relevant remote-reference source includes `src/proxy/modelLoader.ts`,
 `src/proxy.ts`, `src/services/googleAuth.ts`,
@@ -36,9 +36,11 @@ workspace/session/terminal APIs and mobile clients are a separate runtime.
 | Reasoning/thinking, output/context limits, vision | Available | Explicit model overrides; support depends on protocol/model. Context limits cannot enlarge the provider's actual context window. |
 | Retries, fallback chain, circuit breaker | Available | One request owner applies retry/fallback rules, respects cancellation, and does not retry after output is delivered. Disabled and duplicate fallback entries are skipped. |
 | Streaming/tool compatibility and empty/idle protection | Available | Request-scoped translator state, fragmented SSE handling, empty-stream checks, idle timeout, and tool argument validation. |
-| Health/usage diagnostics | Available across two components | Desktop loopback `/health` and aggregate `/metrics`; gateway dashboard provides request history, usage and cost estimates. Counters are not a billing ledger. |
+| Health/usage diagnostics | Available across two components | Direct proxy has a Diagnostics dialog with up to 200 measured request records, latency and actual provider token usage; gateway dashboard has persistent history and cost estimates. Missing measurements remain unknown. |
 | Modern Settings reinjection | Available | Works with the Models & Usage content container and legacy Models/MCP anchor; handles pane replacement without a URL change. Vendor preload APIs are preserved. |
-| Doctor diagnostics and repair | Available as CLI | Read-only `npm run doctor`, installer preflight, transactional `doctor:repair` / `patch:restore`. The reference's separate Doctor Electron application is not bundled. |
+| Doctor diagnostics and repair | CLI plus request diagnostics UI | Read-only `npm run doctor`, installer preflight, transactional repair/restore, and a Diagnostics dialog in the existing UI. Installation checks remain CLI; the separate Doctor Electron application is not bundled. |
+| Real model generation test | Available on explicit action | A short, bounded request uses the production translator and reports generated-text success. Separate from the non-generating connection/catalog test; can consume quota. |
+| Recent models / effort presets | Available in model management | Successful real requests determine recent ordering; optional low/medium/high variants are ordinary saved models with stable identities. No automatic tripling of the provider catalog. |
 
 See [customPreload.ts](../src/customPreload.ts),
 [modelManagement.ts](../src/modelManagement.ts),
@@ -53,7 +55,8 @@ See [customPreload.ts](../src/customPreload.ts),
 | Account JSON import / editing | Available | Import your own `authorized_user` JSON or account arrays. No automatic extraction of browser, IDE, or gcloud credentials. |
 | Secure persistence and masked UI | Available | OAuth results remain in main-process memory until model save; unsaved pending entries expire after 10 minutes. Saved credentials use OS `safeStorage` or local AES-256-GCM. |
 | Access-token refresh | Available | Refreshes as needed; concurrent refreshes share the same pending operation; updated credentials can persist encrypted. |
-| Multiple account selection | Available | Round robin, least loaded, or latest remaining quota; eligible-account conversation affinity, concurrency limits, failure cooldown, and authentication state. The reference's latency/P2C scoring is not duplicated exactly. |
+| Multiple account selection | Available | Round robin, least loaded, quota, or adaptive P2C using measured header latency, load, failures and fresh quota; affinity, concurrency and authentication state remain enforced. |
+| Structured quota/rate-limit governor | Available | Honor Retry-After and typed Google retry/reset metadata; model-specific cooldown and conservative fresh-all-buckets-zero eligibility. No invented five-hour reset or paid-tier quota assumptions. |
 | Quota retrieval / display | Available on request | **Test account** retrieves a quota snapshot, and **Pool status** displays it. The reference's periodic three-minute quota polling is not enabled; quota is refreshed explicitly. |
 | Service/project eligibility | Provider-controlled | OAuth success alone does not grant Cloud Code access or quota. Supply an eligible account/project where required; region and entitlement failures remain visible. |
 
@@ -100,12 +103,39 @@ configuration, and [gateway/UPSTREAM.md](../gateway/UPSTREAM.md) for attribution
 | Go remote daemon workspaces, terminal, filesystem, live agent sessions / MCP relay | Outside this integration; those `/v2` APIs are not implemented by the gateway. |
 | Mobile/Flutter clients and hosted cloud-agent scheduling | Outside this desktop/proxy/web/remote-provider scope. |
 | Existing standalone app WSL bridge | Preserved from the installed vendor runtime. Custom-model routing still applies only to local desktop sessions; it does not reroute the vendor's WSL language server. |
-| Separate VS Code-based Antigravity IDE | Unsupported layout; detected before deployment. This patch targets the standalone Electron desktop agent. |
+| Separate VS Code-based Antigravity IDE | Experimental setting adapter, owned service and browser manager. Requires a recognized unpacked IDE declaring the endpoint setting; native picker/live version compatibility remains unverified. See [IDE setup](ide.md). |
 | Recovery after supported desktop updates | Version-specific preflight, backups, validated hooks, and rollback; unfamiliar runtime layouts fail before replacement. |
 
 The transport choice is deliberate: preserving the installed desktop runtime
 avoids replacing newer WSL, certificate, updater, and host-bridge behavior with
 older source snapshots. See [compatibility and recovery](compatibility.md).
+
+## Source gaps and remaining differences
+
+The v3.7.3 source contains `scripts/update-ide-setting.js`, which sets
+`jetski.cloudCodeUrl`. Its README also describes automatic `out/main.js` bootstrap
+and dual conversation database reconciliation, but their referenced `ag-doctor/`
+implementation is absent at this revision. This project supplies its own managed
+launcher; it does not claim the missing bootstrap or perform speculative database
+deletion. `src/proxy/protoInjector.ts` supports a `GetUserStatus` picker hook in the
+reference, but the available source does not establish a working IDE installation
+path for that hook. Our IDE adapter does not inject it.
+
+| Remaining reference feature | Boundary |
+| --- | --- |
+| Full Doctor installation GUI, log viewer and batch generation test | Installation checks remain CLI; our UI provides measured requests and individual generation tests. |
+| Configurable chat prompt pills | Not injected into unknown IDE/workbench chat DOM. Existing drafts and vendor chat controls are left intact. |
+| Separate Gemini CLI identity / AI Studio key pool | Existing Gemini API-key models and explicit Google Cloud Code accounts remain distinct. No bundled OAuth clients or automatic credential extraction. |
+| Automatic quota polling, disk quota/retry history and adaptive retry-budget persistence | Quota refresh is explicit; routing telemetry is process-local. Existing bounded retries and circuit breakers remain available. |
+| Lost thought-signature recovery | Existing Google passthrough preserves supplied signatures; no speculative signature cache is added without a reproduced loss case. |
+| Encrypted/password configuration exchange | Reference utility functions have no verified application caller; our export deliberately excludes credentials. |
+
+The reference Doctor's historical fallbacks include estimated tokens from step
+counts and default speed/account/latency values (`ag-doctor-ui/src/main.ts` and
+`renderer/traffic-inspector.ts`). Those are not treated as real measurements here.
+The reference's "BPE" helper is heuristic; our context estimates remain labelled
+as approximate. These differences are intentional and are not claims of complete
+product parity.
 
 ## Verification
 

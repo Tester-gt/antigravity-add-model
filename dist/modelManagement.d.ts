@@ -53,6 +53,10 @@ export declare function createModelManager(directory: string, codec: SecretCodec
         }[];
         status: number;
     }>;
+    createEffortVariants(name: string): {
+        success: boolean;
+        count: number;
+    };
     googleLogin(options: GoogleLoginOptions): Promise<{
         success: boolean;
         account: GoogleAccount;
@@ -68,6 +72,19 @@ export declare function createModelManager(directory: string, codec: SecretCodec
             inFlight: number;
             status: string;
             cooldownUntil: number;
+            modelCooldowns: {
+                modelName: string;
+                cooldownUntil: number;
+                reason: import("./googlePoolPolicy").GoogleCooldownReason;
+            }[];
+            requests: number;
+            succeeded: number;
+            failed: number;
+            avgLatencyMs: number;
+            lastStatus: number;
+            quotaAgeMs: number;
+            quotaFresh: boolean;
+            quotaExhausted: boolean;
             quota: import("./googleAccounts").GoogleQuotaSnapshot;
         }[];
     };
@@ -80,6 +97,17 @@ export declare function createModelManager(directory: string, codec: SecretCodec
         quota: import("./googleAccounts").GoogleQuotaSnapshot;
     }>;
     testModel(input: ProbeParams): Promise<{
+        success: boolean;
+        status: number;
+        error: string;
+        message?: undefined;
+    } | {
+        success: boolean;
+        status: number;
+        message: string;
+        error?: undefined;
+    }>;
+    testGeneration(input: ProbeParams): Promise<{
         success: boolean;
         status: number;
         error: string;

@@ -13,6 +13,9 @@ import {
 } from './modelStore';
 import { PROVIDERS, getProvider, resolveApiFormat, workersAiAccountPath } from './providers';
 import { loginGoogleAccount, GoogleLoginOptions } from './googleOAuth';
+import { runGenerationProbe } from './generationProbe';
+import { validateCustomModel } from './schemaValidator';
+import type { CustomModel } from './proxy';
 import {
   GoogleAccount,
   GooglePoolOptions,
@@ -523,6 +526,40 @@ export function createModelManager(
     saveModel,
     presets: () => PROVIDERS,
     discoverModels,
+    createEffortVariants(name: string) {
+      const source = store.list().find((model) => model.name === name);
+      if (!source) throw new Error('Original model no longer exists');
+      if (source.supportsThinking === false) throw new Error('This model is configured without reasoning support');
+      const names = new Set(store.list().map((model) => model.name));
+      const format = resolveApiFormat(source.provider, source.apiFormat as ProbeParams['apiFormat']);
+      const copies = (['low', 'medium', 'high'] as const).map((effort, index) => {
+        let target = `${name}-${effort}`;
+        let suffix = 2;
+        while (names.has(target)) target = `${name}-${effort}-${suffix++}`;
+        names.add(target);
+        const copy: ModelEntry = {
+          ...source,
+          name: target,
+          copyFrom: name,
+          displayName: `${source.displayName || source.externalModelName || source.name} (${effort})`,
+          reasoningEffort: effort,
+        };
+        if (format !== 'openai') {
+          const budget = [1024, 4096, 8192][index];
+          copy.thinkingBudget = budget;
+          copy.maxOutputTokens = Math.max(Number(source.maxOutputTokens) || 16384, budget + 1024);
+          if (source.contextWindow && Number(source.contextWindow) <= Number(copy.maxOutputTokens))
+            throw new Error(
+              'The configured context window is too small for these thinking budgets. Adjust the model limits first.',
+            );
+        }
+        const validation = validateCustomModel(copy);
+        if (!validation.valid) throw new Error(validation.error);
+        return copy;
+      });
+      for (const copy of copies) store.save(copy);
+      return { success: true, count: copies.length };
+    },
     async googleLogin(options: GoogleLoginOptions) {
       if (loginController) throw new Error('A Google login is already in progress');
       const controller = new AbortController();
@@ -583,6 +620,19 @@ export function createModelManager(
         status: result.status,
         message: `Model listing verified (${result.models.length} models). Generation was not tested.`,
       };
+    },
+    async testGeneration(input: ProbeParams) {
+      const probe = resolveProbe(input);
+      if (!probe.externalModelName?.trim()) throw new Error('Enter the provider model ID before testing generation');
+      if (probe.provider === 'google-cloudcode') {
+        const selected = probe.googleAccounts?.find((account) => account.enabled !== false);
+        if (!selected) throw new Error('Add or enable a Google account before testing generation');
+        probe.googleAccounts = [resolveGoogleAccount({ modelName: probe.name, account: selected })];
+      }
+      const model = { ...probe, name: probe.name || 'models/generation-test', enabled: true } as CustomModel;
+      const validation = validateCustomModel(model);
+      if (!validation.valid) throw new Error(validation.error);
+      return runGenerationProbe(model);
     },
     async discoverLocal() {
       const targets = [

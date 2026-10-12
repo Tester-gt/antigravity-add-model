@@ -43,6 +43,8 @@ const crypto_1 = require("crypto");
 const string_decoder_1 = require("string_decoder");
 const providers_1 = require("../providers");
 const googleAccounts_1 = require("../googleAccounts");
+const googlePoolPolicy_1 = require("../googlePoolPolicy");
+const diagnostics_1 = require("../diagnostics");
 const registry = __importStar(require("./registry"));
 const circuitBreaker_1 = require("./circuitBreaker");
 const requestOptions_1 = require("./requestOptions");
@@ -70,12 +72,13 @@ function stopCustomRequests() {
         controller.abort();
 }
 class UpstreamError extends Error {
-    constructor(message, status = 502, retryable = true, retryAfter = 0, mayFallback = true) {
+    constructor(message, status = 502, retryable = true, retryAfter = 0, mayFallback = true, googleRateLimit) {
         super(message);
         this.status = status;
         this.retryable = retryable;
         this.retryAfter = retryAfter;
         this.mayFallback = mayFallback;
+        this.googleRateLimit = googleRateLimit;
     }
 }
 function asUpstreamError(error) {
@@ -105,8 +108,8 @@ function validateToolArguments(value) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
         throw new UpstreamError('Upstream returned invalid tool arguments.', 502, false, 0, false);
 }
-/** Classify schema errors without returning provider text, credentials or echoed prompts. */
-async function toolSchemaErrorHint(upstream) {
+/** Read only a bounded error body for classification; never expose or persist its contents. */
+async function boundedErrorBody(upstream) {
     const chunks = [];
     let size = 0;
     const limit = 16 * 1024;
@@ -129,7 +132,11 @@ async function toolSchemaErrorHint(upstream) {
         clearTimeout(timer);
         upstream.destroy();
     }
-    let message = Buffer.concat(chunks).toString('utf8').trim();
+    return Buffer.concat(chunks).toString('utf8').trim();
+}
+/** Classify schema errors without returning provider text, credentials or echoed prompts. */
+function toolSchemaErrorHint(body) {
+    let message = body;
     if (message.startsWith('{') || message.startsWith('[')) {
         try {
             const data = JSON.parse(message);
@@ -207,7 +214,7 @@ function buildFallbackChain(primary, allModels) {
     return chain;
 }
 /** The sole retry/fallback owner; nothing is retried after any model output was received. */
-async function runCustomModelRequest(res, primary, originalBody, isStream, allModels, cloudEnvelope = true) {
+async function runCustomModelRequest(res, primary, originalBody, isStream, allModels, cloudEnvelope = true, kind = 'request') {
     const toolSchemas = (0, utils_1.collectToolSchemas)(originalBody);
     const controller = new AbortController();
     const { signal } = controller;
@@ -224,6 +231,13 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
     let upstreamOutput = false;
     const deadline = Date.now() + (primary.retryBudgetMs ?? Math.max(primary.timeout ?? 120000, 120000));
     let failure = new UpstreamError('No configured model is currently available.', 503);
+    let effectiveModel = primary;
+    const diagnostic = (0, diagnostics_1.beginDiagnosticRequest)({
+        model: primary.name,
+        provider: primary.provider,
+        stream: isStream,
+        kind,
+    });
     const writeCandidate = (candidate) => {
         if (signal.aborted || res.destroyed)
             throw new Error('Cancelled');
@@ -254,9 +268,9 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
             if (modelIndex > 0)
                 counts.fallbacks += 1;
             let modelFailed = false;
-            const retries = Math.min(5, Math.max(0, model.maxRetries ?? 3));
+            const retries = kind === 'generation-test' ? 0 : Math.min(5, Math.max(0, model.maxRetries ?? 3));
             const cloudCode = model.provider === 'google-cloudcode';
-            const accountCount = cloudCode
+            const accountCount = cloudCode && kind !== 'generation-test'
                 ? (model.googleAccounts || []).filter((account) => account.enabled !== false).length
                 : 0;
             const attemptsAllowed = retries + Math.max(0, accountCount - 1);
@@ -265,6 +279,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                 let request;
                 let accountLease;
                 let totalTimer;
+                let headerLatencyMs;
                 const abort = () => request?.destroy(new Error('Cancelled'));
                 try {
                     if (signal.aborted)
@@ -272,11 +287,13 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                     const remaining = deadline - Date.now();
                     if (remaining <= 0)
                         throw new UpstreamError('Request retry budget exhausted.', 504, false);
+                    effectiveModel = model;
+                    diagnostic.resetUsage();
                     const format = (0, providers_1.resolveApiFormat)(model.provider, model.apiFormat);
                     const externalName = model.externalModelName || model.name.replace(/^models\//, '');
                     if (cloudCode) {
                         const identity = originalBody.sessionId || originalBody.conversationId;
-                        accountLease = await (0, googleAccounts_1.acquireGoogleAccount)(model.name, model.googleAccounts || [], model.googlePool, typeof identity === 'string' ? identity : undefined);
+                        accountLease = await (0, googleAccounts_1.acquireGoogleAccount)(model.name, model.googleAccounts || [], model.googlePool, typeof identity === 'string' ? identity : undefined, externalName.replace(/^models\//, ''));
                         if (signal.aborted)
                             break;
                     }
@@ -330,6 +347,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                         throw new UpstreamError(`Invalid model configuration: ${error.message}`, 400, false, 0, false);
                     }
                     counts.upstreamAttempts += 1;
+                    const upstreamStartedAt = Date.now();
                     const upstream = await new Promise((resolve, reject) => {
                         request = (url.protocol === 'https:' ? https : http).request(url, { method: 'POST', headers, rejectUnauthorized: !model.allowUnauthorized }, resolve);
                         request.once('error', reject);
@@ -338,12 +356,17 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                         signal.addEventListener('abort', abort, { once: true });
                         request.end(JSON.stringify(payload));
                     });
+                    headerLatencyMs = Date.now() - upstreamStartedAt;
                     const status = upstream.statusCode || 502;
                     if (status < 200 || status >= 300) {
-                        const retryAfter = (0, requestOptions_1.parseRetryAfter)(upstream.headers['retry-after']);
-                        const hint = status === 400 || status === 422 ? await toolSchemaErrorHint(upstream) : '';
+                        const errorBody = status === 400 || status === 422 || (cloudCode && status === 429) ? await boundedErrorBody(upstream) : '';
+                        const decision = cloudCode && status === 429
+                            ? (0, googlePoolPolicy_1.classifyGoogleRateLimit)(errorBody, upstream.headers['retry-after'])
+                            : undefined;
+                        const retryAfter = decision?.retryAfterMs ?? (0, requestOptions_1.parseRetryAfter)(upstream.headers['retry-after']);
+                        const hint = status === 400 || status === 422 ? toolSchemaErrorHint(errorBody) : '';
                         upstream.destroy();
-                        throw new UpstreamError(`Upstream returned HTTP ${status}.${hint}`, status, status === 408 || status === 429 || status >= 500, retryAfter, status !== 400 && status !== 422);
+                        throw new UpstreamError(`Upstream returned HTTP ${status}.${hint}`, status, status === 408 || status === 429 || status >= 500, retryAfter, status !== 400 && status !== 422, decision);
                     }
                     if (isStream && String(upstream.headers['content-type']).includes('text/event-stream')) {
                         const decoder = new string_decoder_1.StringDecoder('utf8');
@@ -378,6 +401,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                                 throw new UpstreamError('Upstream reported a stream error.');
                             if (cloudCode && chunk.response)
                                 chunk = chunk.response;
+                            diagnostic.observe(chunk, format);
                             const delta = chunk.choices?.[0]?.delta;
                             if (delta?.content ||
                                 delta?.reasoning_content ||
@@ -471,6 +495,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                             throw new UpstreamError('Upstream returned an error response.');
                         if (cloudCode && parsed.response)
                             parsed = parsed.response;
+                        diagnostic.observe(parsed, format);
                         if ((format === 'openai' && !parsed.choices?.[0]?.message) ||
                             (format === 'anthropic' && !Array.isArray(parsed.content)))
                             throw new UpstreamError('Upstream returned an invalid completion.');
@@ -483,6 +508,18 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                         const mapped = registry.translateResponse(model.provider, parsed, stateKey, format, toolSchemas);
                         if (!mapped?.candidates?.length)
                             throw new UpstreamError('Upstream returned no candidates.');
+                        if (kind === 'generation-test' &&
+                            !mapped.candidates.some((candidate) => {
+                                const content = candidate
+                                    ?.content;
+                                return (Array.isArray(content?.parts) &&
+                                    content.parts.some((part) => part?.thought !== true && typeof part?.text === 'string' && part.text.trim()));
+                            })) {
+                            // The short test can exhaust its output budget despite a healthy account.
+                            // Record the accepted upstream response before the logical test failure.
+                            accountLease?.release({ status, latencyMs: headerLatencyMs });
+                            throw new UpstreamError('The provider did not return generated text. Check the model and test output budget.', 502, false, 0, false);
+                        }
                         if (isStream) {
                             for (const candidate of mapped.candidates)
                                 writeCandidate(candidate);
@@ -494,13 +531,21 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                     }
                     circuits.succeed(circuitKey);
                     completed = true;
+                    accountLease?.release({ status, latencyMs: headerLatencyMs });
                     counts.succeeded += 1;
                     res.end();
                     return;
                 }
                 catch (error) {
                     failure = asUpstreamError(error);
-                    accountLease?.release({ status: failure.status, retryAfterMs: failure.retryAfter });
+                    accountLease?.release({
+                        status: failure.status,
+                        retryAfterMs: failure.googleRateLimit
+                            ? failure.googleRateLimit.retryAfterMs
+                            : failure.retryAfter || undefined,
+                        cooldownReason: failure.googleRateLimit?.reason,
+                        cancelled: signal.aborted,
+                    });
                     if (signal.aborted) {
                         circuits.cancel(circuitKey);
                         break modelLoop;
@@ -566,6 +611,12 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
         res.removeListener('close', onClose);
         controllers.delete(controller);
         counts.active -= 1;
+        diagnostic.finish({
+            outcome: signal.aborted ? 'cancelled' : completed ? 'succeeded' : 'failed',
+            status: signal.aborted ? undefined : completed ? 200 : failure.status,
+            model: effectiveModel.name,
+            provider: effectiveModel.provider,
+        });
         if (!completed) {
             if (signal.aborted)
                 counts.cancelled += 1;

@@ -99,6 +99,8 @@ function fixture(fixed = true) {
     URL,
     Buffer,
     process,
+    setTimeout,
+    clearTimeout,
   });
   fixtures.push({ module: module.exports, directory, servers });
   return { ...module.exports, servers, createServer, startCleanupInterval, stopCleanupInterval };

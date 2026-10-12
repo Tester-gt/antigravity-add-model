@@ -40,6 +40,24 @@ interface ActionResult {
 interface DiscoveryResult extends ActionResult {
   models?: ModelChoice[];
 }
+interface DiagnosticsSnapshot extends ActionResult {
+  active: number;
+  summary: Record<string, number>;
+  recentModels: string[];
+  requests: {
+    model: string;
+    provider: string;
+    timestamp: number;
+    outcome: string;
+    status?: number;
+    latencyMs: number;
+    stream: boolean;
+    kind: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedTokens?: number;
+  }[];
+}
 interface GatewayConfig {
   url: string;
   token: string;
@@ -63,6 +81,8 @@ const storageAPI = {
   deleteCustomModel: (name: string): Promise<ActionResult> => ipcRenderer.invoke('storage:delete-custom-model', name),
   testModelConnection: (model: Partial<CustomModelEntry>): Promise<ActionResult> =>
     ipcRenderer.invoke('storage:test-model-connection', model),
+  testModelGeneration: (model: Partial<CustomModelEntry>): Promise<ActionResult> =>
+    ipcRenderer.invoke('storage:test-model-generation', model),
   getPresets: (): Promise<ProviderPreset[]> => ipcRenderer.invoke('storage:get-provider-presets'),
   discoverModels: (params: Partial<CustomModelEntry>): Promise<DiscoveryResult> =>
     ipcRenderer.invoke('storage:discover-models', params),
@@ -705,8 +725,39 @@ window.addEventListener('DOMContentLoaded', () => {
               },
               rowStatus,
             ),
+            button('Test generation', () => openGenerationTest(model), rowStatus),
             button('Edit', () => openModelModal(model, 'edit'), rowStatus),
             button('Duplicate', () => openModelModal(model, 'duplicate'), rowStatus),
+            ...(model.supportsThinking === false
+              ? []
+              : [
+                  button(
+                    'Effort variants',
+                    () => {
+                      const { body, status, close } = openModal('Create reasoning variants');
+                      body.append(
+                        element(
+                          'p',
+                          'agy-muted',
+                          'Creates three copies with low, medium and high reasoning effort. The provider must support reasoning. For Google and Anthropic formats the thinking budgets are 1,024 / 4,096 / 8,192 tokens; output limits increase if needed to fit the budget. Existing models and credentials are preserved.',
+                        ),
+                      );
+                      body.append(
+                        button(
+                          'Create three variants',
+                          async () => {
+                            requireSuccess(await ipcRenderer.invoke('storage:create-effort-variants', model.name));
+                            close();
+                            await modelsChanged();
+                          },
+                          status,
+                          true,
+                        ),
+                      );
+                    },
+                    rowStatus,
+                  ),
+                ]),
             button(
               'Delete',
               async () => {
@@ -847,6 +898,7 @@ window.addEventListener('DOMContentLoaded', () => {
           ['round-robin', 'Round robin'],
           ['least-loaded', 'Least loaded'],
           ['quota', 'Remaining quota'],
+          ['adaptive', 'Adaptive health and load'],
         ],
         initialPool?.strategy || 'least-loaded',
       );
@@ -1198,6 +1250,15 @@ window.addEventListener('DOMContentLoaded', () => {
           status,
         ),
         button(
+          'Test generation (may incur charges)',
+          async () => {
+            setStatus(status, 'Sending a short generation test…');
+            const result = requireSuccess(await storageAPI.testModelGeneration(connection()));
+            setStatus(status, result.message || 'Generation succeeded.');
+          },
+          status,
+        ),
+        button(
           'Fetch provider models',
           async () => {
             setStatus(status, 'Fetching models…');
@@ -1391,6 +1452,133 @@ window.addEventListener('DOMContentLoaded', () => {
       setStatus(status, String(error), true);
     }
   }
+  function openGenerationTest(model: CustomModelEntry): void {
+    const { body, status } = openModal('Test model generation');
+    body.append(element('p', '', `Model: ${model.displayName || model.externalModelName || model.name}`));
+    body.append(
+      element(
+        'p',
+        'agy-muted',
+        'Sends one “Reply with OK.” request with a 32-token output limit using this model’s saved settings. Your provider may charge for the request. No conversation content is sent.',
+      ),
+    );
+    body.append(
+      button(
+        'Run generation test',
+        async () => {
+          setStatus(status, 'Sending a short generation test…');
+          const result = requireSuccess(await storageAPI.testModelGeneration(model));
+          setStatus(status, result.message || 'Generation succeeded.');
+        },
+        status,
+        true,
+      ),
+    );
+  }
+
+  async function openDiagnostics(): Promise<void> {
+    const { body, status } = openModal('Proxy diagnostics');
+    body.append(
+      element(
+        'p',
+        'agy-muted',
+        'Measured requests from this proxy process only; restarting clears the history. Up to 200 completed requests are retained. Prompts, responses, URLs and credentials are not recorded. Gateway requests have separate history in its dashboard.',
+      ),
+    );
+    const summary = element('div');
+    summary.id = 'agy-diagnostics-summary';
+    const search = field(body, 'Filter by model or provider', 'agy-diagnostics-search');
+    const recent = element('div');
+    const list = element('div');
+    list.id = 'agy-diagnostics-requests';
+    const output = element('textarea');
+    output.id = 'agy-diagnostics-export';
+    output.readOnly = true;
+    output.rows = 8;
+    output.hidden = true;
+    output.setAttribute('aria-label', 'Exported diagnostic metadata');
+    let snapshot: DiagnosticsSnapshot | undefined;
+    const token = (value: unknown) => (typeof value === 'number' ? value.toLocaleString() : 'unknown');
+    const render = () => {
+      if (!snapshot) return;
+      const s = snapshot.summary;
+      summary.replaceChildren(
+        element(
+          'p',
+          '',
+          `${s.requests} completed · ${snapshot.active} active · ${s.succeeded} succeeded · ${s.failed} failed · ${s.cancelled} cancelled`,
+        ),
+      );
+      summary.append(
+        element(
+          'p',
+          'agy-muted',
+          s.measuredRequests
+            ? `Provider-reported tokens: ${token(s.measuredInputRequests ? s.inputTokens : undefined)} input · ${token(s.measuredOutputRequests ? s.outputTokens : undefined)} output · ${token(s.measuredCachedRequests ? s.cachedTokens : undefined)} cached. Usage received for ${s.measuredRequests} of ${s.requests} requests; totals exclude unknown usage.`
+            : 'Token usage: unknown. No provider-reported usage received yet.',
+        ),
+      );
+      recent.replaceChildren();
+      if (snapshot.recentModels.length)
+        recent.append(element('p', 'agy-muted', `Recently used: ${snapshot.recentModels.join(' · ')}`));
+      list.replaceChildren();
+      const query = search.value.trim().toLowerCase();
+      const rows = snapshot.requests.filter((r) => `${r.model} ${r.provider}`.toLowerCase().includes(query));
+      if (!rows.length) list.append(element('p', 'agy-muted', 'No matching requests recorded.'));
+      for (const r of rows) {
+        const row = element('div', 'agy-row');
+        row.append(element('strong', '', `${r.model} · ${r.provider}`));
+        row.append(
+          element(
+            'div',
+            'agy-muted',
+            `${new Date(r.timestamp).toLocaleTimeString()} · ${r.outcome}${r.status ? ` (HTTP ${r.status})` : ''} · ${r.latencyMs} ms · ${r.kind === 'generation-test' ? 'generation test' : r.stream ? 'streaming' : 'request'}`,
+          ),
+        );
+        row.append(
+          element(
+            'div',
+            'agy-muted',
+            `Tokens: ${token(r.inputTokens)} input · ${token(r.outputTokens)} output · ${token(r.cachedTokens)} cached`,
+          ),
+        );
+        list.append(row);
+      }
+    };
+    const refresh = async () => {
+      snapshot = await ipcRenderer.invoke('storage:get-diagnostics');
+      requireSuccess(snapshot);
+      if (body.isConnected) render();
+    };
+    search.addEventListener('input', render);
+    const actions = element('div', 'agy-actions');
+    actions.append(
+      button('Refresh diagnostics', refresh, status),
+      button(
+        'Export diagnostics',
+        () => {
+          output.value = JSON.stringify(snapshot, null, 2);
+          output.hidden = false;
+          output.focus();
+          output.select();
+        },
+        status,
+      ),
+      button(
+        'Clear diagnostic history',
+        async () => {
+          requireSuccess(await ipcRenderer.invoke('storage:clear-diagnostics'));
+          output.value = '';
+          output.hidden = true;
+          await refresh();
+        },
+        status,
+      ),
+    );
+    body.append(summary, recent, actions, output, list);
+    await refresh();
+  }
+
   async function openGateway(): Promise<void> {
     const { body, status } = openModal('Remote gateway');
     try {
@@ -1502,6 +1690,7 @@ window.addEventListener('DOMContentLoaded', () => {
       button('Import', () => openImportExport('import')),
       button('Export', () => openImportExport('export')),
       button('Remote gateway', openGateway),
+      button('Diagnostics', openDiagnostics),
     );
     const search = field(section, 'Search models', 'agy-model-search', searchTerm, 'search');
     search.placeholder = 'Search by name, model ID or provider';

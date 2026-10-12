@@ -84,6 +84,8 @@ async function fixture(models: CustomModel[]) {
     URL,
     Buffer,
     process,
+    setTimeout,
+    clearTimeout,
     require: (id: string) => {
       if (!Object.hasOwn(dependencies, id)) throw new Error(`Unexpected proxy dependency: ${id}`);
       return dependencies[id];

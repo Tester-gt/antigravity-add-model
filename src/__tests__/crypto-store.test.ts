@@ -18,6 +18,7 @@ function fixture(available = false, failEncryption = false) {
     fs,
     path,
     crypto,
+    'node:os': os,
     electron: {
       app: { getPath: () => directory },
       safeStorage: {

@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Your providers. Your local models. Inside Antigravity.</strong><br>
-  Model management for the standalone desktop app, with an optional gateway and web dashboard.
+  Model management for the desktop app, an experimental IDE adapter, and an optional gateway.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
 Add external API providers and local models alongside Antigravity's built-in models. Configure them in Settings, switch models from the chat picker, and optionally route requests through a gateway with history, fallback providers, and a browser dashboard.
 
 > [!IMPORTANT]
-> This project targets the **standalone Electron desktop agent**. The separate **VS Code-based Antigravity IDE is not supported**. Custom-model routing applies to local desktop sessions; the vendor's WSL routing is preserved. Check [compatibility](docs/compatibility.md) before installing.
+> The **standalone Electron desktop agent** uses the additive installer below. The separate **VS Code-based Antigravity IDE** now has an [experimental settings adapter and local web manager](docs/ide.md); native IDE picker compatibility still needs live-version validation. Custom-model routing applies to local sessions; the vendor's WSL routing is preserved. Check [compatibility](docs/compatibility.md) before installing.
 
 ## Quick links
 
@@ -38,6 +38,7 @@ Add external API providers and local models alongside Antigravity's built-in mod
 | [Add your first model](#add-your-first-model) | [Connect from another computer](#connect-from-another-computer) | [Supported app versions and layouts](docs/compatibility.md) |
 | [Providers and model catalogs](docs/providers.md) | [Model configuration](docs/configuration.md) | [Changelog](CHANGELOG.md) |
 | [Development and contributing](#development-and-contributing) | [Google account setup](docs/configuration.md#google-cloud-code-account-pools) | [Browse existing issues](https://github.com/vahapogut/antigravity-add-model/issues) |
+| [Antigravity IDE setup](docs/ide.md) | [Source-based feature comparison](docs/feature-parity.md) | [IDE status and restore](docs/ide.md#status-and-recovery) |
 
 ## What you can do
 
@@ -46,7 +47,9 @@ Add external API providers and local models alongside Antigravity's built-in mod
 | **Manage models** | Provider groups, search, edit, duplicate, enable/disable, and model discovery. |
 | **Connect your providers** | OpenAI, Anthropic, Gemini, OpenRouter, [Cloudflare Workers AI](docs/providers.md#cloudflare-workers-ai), and other compatible APIs; local services such as Ollama, LM Studio, and vLLM. |
 | **Tune requests** | Protocol selection, reasoning settings, context/output limits, custom headers, timeouts, retries, fallbacks, and circuit breakers. |
-| **Use Google account pools** | Explicit OAuth sign-in with your own client, encrypted account storage, token refresh, quota checks, and account selection. |
+| **Use Google account pools** | Explicit OAuth sign-in with your own client, encrypted storage, quota checks, adaptive account selection and model-specific cooldowns. |
+| **Inspect direct requests** | Diagnostics with recent requests, measured latency/token usage, and an explicit small generation test. |
+| **Connect Antigravity IDE** | Experimental reversible settings adapter, owned proxy launcher and browser model manager. [Compatibility limits](docs/ide.md#validation-boundary). |
 | **Share configuration** | Validated JSON/base64 import and exports that omit stored credentials. |
 | **Add a web dashboard** | Optional gateway with provider routing, request/session history, replay, charts, and cost estimates. |
 | **Connect remotely** | Authenticated gateway access through a tunnel or a configured network endpoint. |
@@ -116,6 +119,16 @@ npm run build
 ```
 
 Already have the repository? Update your checkout, then run the dependency and build commands again.
+
+Using **Antigravity IDE**? Continue with [IDE setup](docs/ide.md) instead of the
+standalone installer below. Its basic flow is:
+
+```sh
+npm run ide:check -- --resources "/path/to/Antigravity IDE/resources"
+npm run ide:apply -- --resources "/path/to/Antigravity IDE/resources"
+npm run proxy:start -- --open
+npm run ide:launch -- --resources "/path/to/Antigravity IDE/resources"
+```
 
 ### 2. Check and patch the installed app
 

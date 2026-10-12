@@ -2,6 +2,15 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — IDE adapter and direct-proxy diagnostics
+
+- Add an experimental Antigravity IDE settings adapter with recognized-layout preflight, comment-preserving edits, hash-checked backups, conflict-safe restore and managed launch. No vendor code or OS startup tasks are changed; native IDE picker compatibility requires live validation.
+- Add an owned Node proxy service and authenticated loopback model manager using the same actions as the desktop UI. Service lifecycle verifies its own instance, refuses occupied ports and rejects cross-origin browser requests.
+- Add bounded direct-request diagnostics with measured latency, provider token usage and recent models, plus an explicit short generation test. No prompts, response text or credentials are retained in diagnostic history.
+- Add optional low/medium/high effort variants with copied encrypted credentials and recent-use ordering in the model manager. Variants of the same upstream model share its account cooldown.
+- Add adaptive Google account selection, measured request/latency counters, fresh-quota eligibility and model-scoped cooldowns. Honor typed Google retry/reset details without inventing quota refill times.
+- Refresh the [feature comparison](docs/feature-parity.md) against upstream v3.7.3, distinguishing verified source behavior from unavailable implementations and separate products.
+
 ### Unreleased — Vision model detection and image forwarding
 
 - Fix [issue #11](https://github.com/vahapogut/antigravity-add-model/issues/11): recognize DeepSeek-VL/VL2, Janus/Janus-Pro and supported Flash model names without excluding an entire provider family. Preserve explicit image-support overrides and read native provider `input_modalities` metadata.

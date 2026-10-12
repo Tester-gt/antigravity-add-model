@@ -44,6 +44,8 @@ const path = __importStar(require("node:path"));
 const modelStore_1 = require("./modelStore");
 const providers_1 = require("./providers");
 const googleOAuth_1 = require("./googleOAuth");
+const generationProbe_1 = require("./generationProbe");
+const schemaValidator_1 = require("./schemaValidator");
 const googleAccounts_1 = require("./googleAccounts");
 function checkedUrl(value) {
     const url = new URL(value);
@@ -488,6 +490,43 @@ function createModelManager(directory, codec, openExternal, dependencies = { log
         saveModel,
         presets: () => providers_1.PROVIDERS,
         discoverModels,
+        createEffortVariants(name) {
+            const source = store.list().find((model) => model.name === name);
+            if (!source)
+                throw new Error('Original model no longer exists');
+            if (source.supportsThinking === false)
+                throw new Error('This model is configured without reasoning support');
+            const names = new Set(store.list().map((model) => model.name));
+            const format = (0, providers_1.resolveApiFormat)(source.provider, source.apiFormat);
+            const copies = ['low', 'medium', 'high'].map((effort, index) => {
+                let target = `${name}-${effort}`;
+                let suffix = 2;
+                while (names.has(target))
+                    target = `${name}-${effort}-${suffix++}`;
+                names.add(target);
+                const copy = {
+                    ...source,
+                    name: target,
+                    copyFrom: name,
+                    displayName: `${source.displayName || source.externalModelName || source.name} (${effort})`,
+                    reasoningEffort: effort,
+                };
+                if (format !== 'openai') {
+                    const budget = [1024, 4096, 8192][index];
+                    copy.thinkingBudget = budget;
+                    copy.maxOutputTokens = Math.max(Number(source.maxOutputTokens) || 16384, budget + 1024);
+                    if (source.contextWindow && Number(source.contextWindow) <= Number(copy.maxOutputTokens))
+                        throw new Error('The configured context window is too small for these thinking budgets. Adjust the model limits first.');
+                }
+                const validation = (0, schemaValidator_1.validateCustomModel)(copy);
+                if (!validation.valid)
+                    throw new Error(validation.error);
+                return copy;
+            });
+            for (const copy of copies)
+                store.save(copy);
+            return { success: true, count: copies.length };
+        },
         async googleLogin(options) {
             if (loginController)
                 throw new Error('A Google login is already in progress');
@@ -550,6 +589,22 @@ function createModelManager(directory, codec, openExternal, dependencies = { log
                 status: result.status,
                 message: `Model listing verified (${result.models.length} models). Generation was not tested.`,
             };
+        },
+        async testGeneration(input) {
+            const probe = resolveProbe(input);
+            if (!probe.externalModelName?.trim())
+                throw new Error('Enter the provider model ID before testing generation');
+            if (probe.provider === 'google-cloudcode') {
+                const selected = probe.googleAccounts?.find((account) => account.enabled !== false);
+                if (!selected)
+                    throw new Error('Add or enable a Google account before testing generation');
+                probe.googleAccounts = [resolveGoogleAccount({ modelName: probe.name, account: selected })];
+            }
+            const model = { ...probe, name: probe.name || 'models/generation-test', enabled: true };
+            const validation = (0, schemaValidator_1.validateCustomModel)(model);
+            if (!validation.valid)
+                throw new Error(validation.error);
+            return (0, generationProbe_1.runGenerationProbe)(model);
         },
         async discoverLocal() {
             const targets = [

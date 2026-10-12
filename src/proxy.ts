@@ -8,7 +8,6 @@ import * as http from 'http';
 import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
-import { app } from 'electron';
 import log from 'electron-log';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -74,6 +73,18 @@ let server: http.Server | null = null;
 let proxyPort = 0;
 let startingProxy: Promise<number> | null = null;
 let stoppingProxy: Promise<void> | null = null;
+let serviceDataDirectory: string | undefined;
+let shutdownGraceMs: number | undefined;
+
+export interface ProxyStartOptions {
+  /** Fixed loopback port for the IDE service; no automatic port fallback. */
+  port?: number;
+  dataDirectory?: string;
+  /** Addon-owned HTTP management routes. Return true when handled. */
+  handleManagement?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
+  /** Node service only: bound shutdown of unfinished management HTTP bodies. */
+  shutdownGraceMs?: number;
+}
 
 // Shared cross-turn state
 import {
@@ -112,7 +123,7 @@ function generateModelPlaceholderId(model: CustomModel): string {
 }
 
 function getCustomModelsPath(): string {
-  const geminiDir = path.join(app.getPath('home'), '.gemini', 'antigravity');
+  const geminiDir = serviceDataDirectory || path.join(require('electron').app.getPath('home'), '.gemini', 'antigravity');
   return path.join(geminiDir, 'custom_models.json');
 }
 
@@ -1216,13 +1227,20 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 
 // ─── Server Start/Stop ────────────────────────────────────────────────────
 
-export async function startProxy(): Promise<number> {
+export async function startProxy(options: ProxyStartOptions = {}): Promise<number> {
   if (stoppingProxy) await stoppingProxy;
   if (server?.listening && proxyPort) return proxyPort;
   if (startingProxy) return startingProxy;
 
-  const requiredPort = getRequiredProxyPort(app.getAppPath());
-  const newServer = http.createServer(handleRequest);
+  if (options.port !== undefined && (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)) {
+    throw new Error('Proxy port must be an integer between 1 and 65535');
+  }
+  serviceDataDirectory = options.dataDirectory ? path.resolve(options.dataDirectory) : undefined;
+  shutdownGraceMs = options.shutdownGraceMs;
+  const requiredPort = options.port ?? getRequiredProxyPort(require('electron').app.getAppPath());
+  const newServer = http.createServer((req, res) => {
+    if (!options.handleManagement?.(req, res)) handleRequest(req, res);
+  });
   server = newServer;
   startCleanupInterval();
   startingProxy = listenProxy(newServer, requiredPort ?? 50999, requiredPort === undefined)
@@ -1259,7 +1277,11 @@ export function stopProxy(): Promise<void> {
     stopCustomRequests();
     if (server) {
       const closingServer = server;
-      await new Promise<void>((resolve) => closingServer.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        const timer = shutdownGraceMs === undefined ? undefined : setTimeout(() => closingServer.closeAllConnections(), shutdownGraceMs);
+        timer?.unref?.();
+        closingServer.close(() => { clearTimeout(timer); resolve(); });
+      });
       log.info('[Proxy] Server stopped');
     }
     server = null;
