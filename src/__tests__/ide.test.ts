@@ -26,6 +26,16 @@ function fixture(source: string | null = '{}\n') {
   put(executable, 'fixture executable - never run');
   return { root, resources, settings, executable, platform: 'win32', app };
 }
+function coreEndpointFixture() {
+  const f = fixture();
+  put(path.join(f.app, 'product.json'), JSON.stringify({ nameShort: 'Antigravity IDE', applicationName: 'antigravity-ide', ideVersion: '2.5.5', commit: 'ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8' }));
+  put(path.join(f.app, 'extensions/antigravity/package.json'), JSON.stringify({ name: 'antigravity', publisher: 'google', main: './dist/extension.js' }));
+  // Small source excerpts from the official IDE 2.5.5 entry points, without any
+  // vendor auth constants or execution of vendor code in the test process.
+  put(path.join(f.app, 'out/main.js'), 'cloudCodeUrlOverride:this._configurationService.getValue("jetski.cloudCodeUrl");this.makePostRequest("v1internal:fetchAvailableModels",eSt);x.client.setCloudCodeURL(Ur(oSt,{url:await this.getCloudCodeUrl()}))');
+  put(path.join(f.app, 'extensions/antigravity/dist/extension.js'), 'const x=await o.getCloudCodeUrl();_.push("--cloud_code_endpoint",x),_.push("--subclient_type","ide")');
+  return f;
+}
 afterEach(() => {
   for (const root of roots.splice(0)) {
     expect(path.dirname(path.resolve(root))).toBe(fs.realpathSync(os.tmpdir()));
@@ -66,6 +76,39 @@ describe('IDE JSONC settings', () => {
 });
 
 describe('verified IDE endpoint adapter', () => {
+  it('recognizes the inspected IDE 2.5.5 core setting even when its extension does not declare it', () => {
+    const f = coreEndpointFixture();
+    const originalCore = fs.readFileSync(path.join(f.app, 'out/main.js'));
+    const originalExtension = fs.readFileSync(path.join(f.app, 'extensions/antigravity/dist/extension.js'));
+    expect(inspectIde(f).declaredBy).toBe('core:antigravity-ide-2.5.5');
+    expect(configureIde({ ...f, action: 'check' })).toMatchObject({ version: '1.107.0', ideVersion: '2.5.5' });
+    expect(configureIde({ ...f, action: 'apply' }).applied).toBe(true);
+    expect(configureIde({ ...f, action: 'restore' }).status).toBe('restored');
+    expect(fs.readFileSync(f.settings, 'utf8')).toBe('{}\n');
+    expect(fs.readFileSync(path.join(f.app, 'out/main.js'))).toEqual(originalCore);
+    expect(fs.readFileSync(path.join(f.app, 'extensions/antigravity/dist/extension.js'))).toEqual(originalExtension);
+  });
+  it.each(['core-setting', 'catalog', 'ls-update', 'ls-launch', 'ide-subclient', 'release', 'publisher'])(
+    'refuses an unverified core layout missing %s before modifying settings', (missing) => {
+      const f = coreEndpointFixture();
+      const core = path.join(f.app, 'out/main.js');
+      const launcher = path.join(f.app, 'extensions/antigravity/dist/extension.js');
+      const replacements: Record<string, [string, string]> = {
+        'core-setting': [core, 'jetski.cloudCodeUrl'],
+        catalog: [core, 'v1internal:fetchAvailableModels'],
+        'ls-update': [core, 'setCloudCodeURL'],
+        'ls-launch': [launcher, '--cloud_code_endpoint'],
+        'ide-subclient': [launcher, '--subclient_type'],
+        release: [path.join(f.app, 'product.json'), 'ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8'],
+        publisher: [path.join(f.app, 'extensions/antigravity/package.json'), 'google'],
+      };
+      const [filename, needle] = replacements[missing]!;
+      fs.writeFileSync(filename, fs.readFileSync(filename, 'utf8').replace(needle, 'unrecognized'));
+      expect(() => configureIde({ ...f, action: 'apply' })).toThrow('UNSUPPORTED_IDE');
+      expect(fs.readFileSync(f.settings, 'utf8')).toBe('{}\n');
+      expect(fs.existsSync(`${f.settings}.antigravity-model-patch`)).toBe(false);
+    },
+  );
   it('checks without writing or changing vendor runtime', () => {
     const f = fixture();
     const before = fs.readFileSync(path.join(f.app, 'out/main.js'));

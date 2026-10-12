@@ -499,6 +499,9 @@ window.addEventListener('DOMContentLoaded', () => {
                     row.dataset.enabled = String(model.enabled !== false);
                     const info = element('div', 'agy-row-info');
                     info.append(element('strong', '', model.displayName || model.name), element('div', 'agy-muted', model.externalModelName));
+                    if (model.nativePickerAvailable === false)
+                        info.append(element('div', 'agy-muted', typeof model.nativePickerError === 'string' ? model.nativePickerError :
+                            'Not currently available in the native model picker. Direct API access remains available.'));
                     const rowStatus = statusNode();
                     info.append(rowStatus);
                     const actions = element('div', 'agy-actions');
@@ -1168,6 +1171,50 @@ window.addEventListener('DOMContentLoaded', () => {
         return contentType?.split(';', 1)[0].trim().toLowerCase() === 'application/json';
     }
     const customModelsCache = { models: [], ts: 0 };
+    function injectMissingCustomModels(parsed, customModels) {
+        const key = ['models', 'availableModels', 'available_models'].find((name) => parsed[name] !== undefined) || 'models';
+        const collection = parsed[key];
+        // Preserve list/protocol shapes we do not own; the proxy handles array catalogs.
+        if (collection !== undefined && (!collection || typeof collection !== 'object' || Array.isArray(collection)))
+            return false;
+        const modelsObj = (collection || {});
+        const legacySlug = (model) => 'custom-' + String(model.externalModelName || model.name || '')
+            .replace(/^models\//, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase();
+        const usedLabels = new Set(Object.values(modelsObj).map((entry) => entry?.displayName).filter((label) => typeof label === 'string'));
+        let changed = false;
+        for (const model of customModels) {
+            if (model.nativePickerAvailable === false)
+                continue;
+            const authoritative = typeof model.nativeCatalogId === 'string' && typeof model.nativeModelId === 'string';
+            const slug = authoritative ? model.nativeCatalogId : legacySlug(model);
+            // Compatibility with older IPC: never guess a shared external alias for effort variants.
+            if (!authoritative && customModels.filter((other) => legacySlug(other) === slug).length !== 1)
+                continue;
+            const placeholder = authoritative ? model.nativeModelId : 'MODEL_PLACEHOLDER_M' +
+                (400 + hashCodeStr(String(model.displayName || model.name || 'custom-model').toLowerCase()) % 200);
+            const baseLabel = model.displayName || model.name;
+            // The proxy is authoritative. Reinjection must not overwrite its capabilities or add a legacy duplicate.
+            if (Object.prototype.hasOwnProperty.call(modelsObj, slug) || Object.entries(modelsObj).some(([id, entry]) => id.startsWith('custom-') && entry?.model === placeholder && entry.displayName === baseLabel))
+                continue;
+            let displayName = baseLabel;
+            if (usedLabels.has(displayName) || customModels.filter((entry) => (entry.displayName || entry.name) === baseLabel).length > 1)
+                displayName = `${baseLabel} (${String(model.name).replace(/^models\//, '')})`;
+            let suffix = 2;
+            while (usedLabels.has(displayName))
+                displayName = `${baseLabel} (${String(model.name).replace(/^models\//, '')} #${suffix++})`;
+            usedLabels.add(displayName);
+            modelsObj[slug] = {
+                displayName, recommended: true,
+                maxTokens: model.contextWindow || 1048576, maxOutputTokens: model.maxOutputTokens || 4096,
+                tokenizerType: 'LLAMA_WITH_SPECIAL', model: placeholder,
+                apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', modelProvider: 'MODEL_PROVIDER_GOOGLE',
+            };
+            changed = true;
+        }
+        if (changed)
+            parsed[key] = modelsObj;
+        return changed;
+    }
     async function getCustomModelsForInjection() {
         if (Date.now() - customModelsCache.ts < 30000)
             return customModelsCache.models;
@@ -1208,29 +1255,11 @@ window.addEventListener('DOMContentLoaded', () => {
                             const responseText = this.responseText;
                             if (responseText && responseText.length > 10) {
                                 const parsed = JSON.parse(responseText);
-                                const modelsObj = (parsed.models || parsed.availableModels || parsed.available_models || {});
-                                for (const m of customModels) {
-                                    const slug = 'custom-' +
-                                        (m.externalModelName || m.name || '')
-                                            .replace(/^models\//, '')
-                                            .replace(/[^a-zA-Z0-9]+/g, '-')
-                                            .replace(/^-+|-+$/g, '')
-                                            .toLowerCase();
-                                    modelsObj[slug] = {
-                                        displayName: m.displayName || m.name,
-                                        recommended: true,
-                                        maxTokens: m.contextWindow || 1048576,
-                                        maxOutputTokens: m.maxOutputTokens || 4096,
-                                        tokenizerType: 'LLAMA_WITH_SPECIAL',
-                                        model: 'MODEL_PLACEHOLDER_M' +
-                                            (400 + (Math.abs(hashCodeStr(m.displayName || m.name || '')) % 200)),
-                                        apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                                        modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                                    };
+                                if (injectMissingCustomModels(parsed, customModels)) {
+                                    // Override only a changed response; keep native event ordering intact.
+                                    Object.defineProperty(this, 'responseText', { value: JSON.stringify(parsed), writable: true });
+                                    Object.defineProperty(this, 'response', { value: JSON.stringify(parsed), writable: true });
                                 }
-                                // Override response
-                                Object.defineProperty(this, 'responseText', { value: JSON.stringify(parsed), writable: true });
-                                Object.defineProperty(this, 'response', { value: JSON.stringify(parsed), writable: true });
                             }
                         }
                         catch {
@@ -1262,26 +1291,8 @@ window.addEventListener('DOMContentLoaded', () => {
                     const text = await cloned.text();
                     if (text && text.length > 10) {
                         const parsed = JSON.parse(text);
-                        const modelsObj = (parsed.models || parsed.availableModels || parsed.available_models || {});
-                        for (const m of customModels) {
-                            const slug = 'custom-' +
-                                (m.externalModelName || m.name || '')
-                                    .replace(/^models\//, '')
-                                    .replace(/[^a-zA-Z0-9]+/g, '-')
-                                    .replace(/^-+|-+$/g, '')
-                                    .toLowerCase();
-                            modelsObj[slug] = {
-                                displayName: m.displayName || m.name,
-                                recommended: true,
-                                maxTokens: m.contextWindow || 1048576,
-                                maxOutputTokens: m.maxOutputTokens || 4096,
-                                tokenizerType: 'LLAMA_WITH_SPECIAL',
-                                model: 'MODEL_PLACEHOLDER_M' +
-                                    (400 + (Math.abs(hashCodeStr(m.displayName || m.name || '')) % 200)),
-                                apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                                modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                            };
-                        }
+                        if (!injectMissingCustomModels(parsed, customModels))
+                            return response;
                         return new Response(JSON.stringify(parsed), {
                             status: response.status,
                             statusText: response.statusText,

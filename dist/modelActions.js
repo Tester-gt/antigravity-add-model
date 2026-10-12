@@ -1,16 +1,81 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createModelActions = createModelActions;
 const diagnostics_1 = require("./diagnostics");
+const path = __importStar(require("node:path"));
+const modelIdentity_1 = require("./modelIdentity");
 function createModelActions(manager) {
     return {
         'storage:get-custom-models': () => {
+            const models = manager.store.list();
+            // The proxy and both management transports share the same persistent
+            // native identity registry. Do not regenerate enum IDs in the renderer.
+            let identities = [];
+            let identityError;
+            try {
+                identities = (0, modelIdentity_1.allocateModelIdentities)(path.dirname(manager.store.filename), models);
+            }
+            catch (error) {
+                // Listing/editing saved providers remains possible when the identity
+                // registry is unavailable; native injection must fail closed.
+                identityError =
+                    (error instanceof Error ? error.message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 512) : '') ||
+                        'Native model identity metadata is unavailable. Retry after resolving the local metadata error.';
+            }
+            const byName = new Map(identities.map((identity) => [identity.name, identity]));
             const recent = (0, diagnostics_1.getRecentModelNames)();
             const rank = (name) => {
                 const index = recent.indexOf(name);
                 return index < 0 ? recent.length : index;
             };
-            return manager.store.list().sort((a, b) => rank(a.name) - rank(b.name));
+            return models
+                .map((model) => {
+                const identity = byName.get(model.name);
+                return {
+                    ...model,
+                    nativeCatalogId: identity?.catalogId,
+                    nativeModelId: identity?.placeholderId,
+                    nativePickerAvailable: !!identity?.placeholderId,
+                    nativePickerError: identity?.placeholderId
+                        ? undefined
+                        : identityError ||
+                            'Native model picker capacity reached; direct API alias remains available. 651 supported slots include native reservations and retained deleted models.',
+                };
+            })
+                .sort((a, b) => rank(a.name) - rank(b.name));
         },
         'storage:save-custom-model': manager.saveModel,
         'storage:delete-custom-model': (name) => {

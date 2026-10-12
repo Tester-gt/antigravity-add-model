@@ -47,6 +47,8 @@ export interface ProxyStartOptions {
     handleManagement?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
     /** Node service only: bound shutdown of unfinished management HTTP bodies. */
     shutdownGraceMs?: number;
+    /** IDE account bootstrap uses PROD, then the account's declared Cloud Code tier. */
+    ideCloudCodeRouting?: boolean;
 }
 export declare function startProxy(options?: ProxyStartOptions): Promise<number>;
 export declare function stopProxy(): Promise<void>;

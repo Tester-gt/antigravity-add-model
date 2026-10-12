@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Your providers. Your local models. Inside Antigravity.</strong><br>
-  Model management for the desktop app, an experimental IDE adapter, and an optional gateway.
+  Model management for the desktop app, Antigravity IDE, and an optional gateway.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
 Add external API providers and local models alongside Antigravity's built-in models. Configure them in Settings, switch models from the chat picker, and optionally route requests through a gateway with history, fallback providers, and a browser dashboard.
 
 > [!IMPORTANT]
-> The **standalone Electron desktop agent** uses the additive installer below. The separate **VS Code-based Antigravity IDE** now has an [experimental settings adapter and local web manager](docs/ide.md); native IDE picker compatibility still needs live-version validation. Custom-model routing applies to local sessions; the vendor's WSL routing is preserved. Check [compatibility](docs/compatibility.md) before installing.
+> The **standalone Electron desktop agent** uses the additive installer below. The separate **VS Code-based Antigravity IDE** uses its own [settings adapter and local web manager](docs/ide.md). Windows IDE **2.5.5** sign-in, native model selection and streamed chat were verified with a local OpenAI-compatible provider; see the [validation results](docs/ide.md#validation-boundary). Custom-model routing applies to local sessions; the vendor's WSL routing is preserved. Check [compatibility](docs/compatibility.md) before installing.
 
 ## Quick links
 
@@ -49,7 +49,8 @@ Add external API providers and local models alongside Antigravity's built-in mod
 | **Tune requests** | Protocol selection, reasoning settings, context/output limits, custom headers, timeouts, retries, fallbacks, and circuit breakers. |
 | **Use Google account pools** | Explicit OAuth sign-in with your own client, encrypted storage, quota checks, adaptive account selection and model-specific cooldowns. |
 | **Inspect direct requests** | Diagnostics with recent requests, measured latency/token usage, and an explicit small generation test. |
-| **Connect Antigravity IDE** | Experimental reversible settings adapter, owned proxy launcher and browser model manager. [Compatibility limits](docs/ide.md#validation-boundary). |
+| **Connect Antigravity IDE** | Reversible settings adapter, owned proxy launcher and browser model manager; native picker and streamed chat verified on Windows IDE 2.5.5 with a local OpenAI-compatible provider. [Setup](docs/ide.md). |
+| **Keep native model selections stable** | Persistent collision-free IDs for model aliases and effort variants, with explicit [native picker capacity](docs/ide.md#native-model-identities-and-capacity). |
 | **Share configuration** | Validated JSON/base64 import and exports that omit stored credentials. |
 | **Add a web dashboard** | Optional gateway with provider routing, request/session history, replay, charts, and cost estimates. |
 | **Connect remotely** | Authenticated gateway access through a tunnel or a configured network endpoint. |

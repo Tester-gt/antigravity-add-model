@@ -14,18 +14,19 @@ archive with an `out/main.js` entry point), a VS Code workbench, and a different
 language-server integration. Copying this project's `dist` directory into it
 does not load the proxy or add a settings dashboard. The installer detects that
 layout and exits with `NOT_SUPPORTED` before modifying application files.
-Use the separate [experimental IDE adapter](ide.md): it validates the IDE's
-declared `jetski.cloudCodeUrl` setting, backs up and changes user settings, and
+Use the separate [IDE adapter](ide.md): it validates the IDE's declared
+`jetski.cloudCodeUrl` setting or the verified 2.5.5 core implementation, backs up and changes user settings, and
 launches an owned Node proxy before the IDE. It includes a local web model manager.
-Native IDE picker behavior, including macOS IDE 2.1.1, has not been validated in
-a live signed-in IDE. [Issue #2](https://github.com/vahapogut/antigravity-add-model/issues/2)
-remains relevant to that validation.
+Windows IDE 2.5.5 was verified with real sign-in, native model selection and a
+streamed chat response through a local OpenAI-compatible provider. This does not
+establish GUI compatibility for other versions or platforms, including macOS
+IDE 2.1.1 reported in [Issue #2](https://github.com/vahapogut/antigravity-add-model/issues/2).
 
 | Installation | Current behavior |
 | --- | --- |
 | Standalone Electron `app.asar`, entry `dist/main.js` | Validated runtime hooks; vendor APIs, certificate handling, updater and window code are retained |
 | Standalone Windows app connected to WSL | Vendor WSL behavior is retained; custom-model proxy routing applies only to local sessions |
-| Unpacked IDE `app/out` with a declared `jetski.cloudCodeUrl` setting | Experimental `ide:apply`/`ide:launch` adapter; standalone installer still refuses this layout |
+| Unpacked IDE `app/out` with a declared endpoint setting or verified 2.5.5 core | Separate `ide:apply`/`ide:launch` adapter; Windows 2.5.5 live chat verified |
 | Archived IDE with an `out/main.js` entry point | Unsupported; refused without changing the application |
 | Missing or unrecognized application layout | Explicit error; no success message |
 

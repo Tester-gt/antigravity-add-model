@@ -179,6 +179,12 @@ async function fixture(
 }
 
 describe('custom model settings in the preserved vendor preload', () => {
+  it('explains when a model has no available native picker identity', async () => {
+    const f = await fixture(undefined, [{ ...model, nativePickerAvailable: false }]);
+    expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain('Not currently available in the native model picker');
+    expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain('Direct API access remains available');
+  });
+
   it('shows diagnostics with unknown usage and escapes model names in filtered history and export', async () => {
     const f = await fixture();
     await f.click('Diagnostics');

@@ -4,7 +4,9 @@ Release history preserved from the project README. Historical entries describe t
 
 ### Unreleased — IDE adapter and direct-proxy diagnostics
 
-- Add an experimental Antigravity IDE settings adapter with recognized-layout preflight, comment-preserving edits, hash-checked backups, conflict-safe restore and managed launch. No vendor code or OS startup tasks are changed; native IDE picker compatibility requires live validation.
+- Add an Antigravity IDE settings adapter with recognized-layout preflight, comment-preserving edits, hash-checked backups, conflict-safe restore and managed launch. Recognize the official IDE 2.5.5 hidden core endpoint implementation and report its IDE version separately from VS Code 1.107.0. No vendor code or OS startup tasks are changed.
+- Fix native IDE account setup by preserving valid HTTP framing for buffered proxy requests and selecting the production Cloud Code host before applying the account tier's upstream choice. Confirmed live Windows IDE 2.5.5 sign-in, native picker selection and streamed chat through a local OpenAI-compatible provider; see the [IDE validation results](docs/ide.md#validation-boundary).
+- Replace colliding native placeholder hashes with a persistent identity registry shared by proxy and model-management transports. Preserve IDs across display-name edits and restarts, reserve native/deleted-model assignments, and report native slot exhaustion while keeping direct API aliases usable.
 - Add an owned Node proxy service and authenticated loopback model manager using the same actions as the desktop UI. Service lifecycle verifies its own instance, refuses occupied ports and rejects cross-origin browser requests.
 - Add bounded direct-request diagnostics with measured latency, provider token usage and recent models, plus an explicit short generation test. No prompts, response text or credentials are retained in diagnostic history.
 - Add optional low/medium/high effort variants with copied encrypted credentials and recent-use ordering in the model manager. Variants of the same upstream model share its account cooldown.

@@ -218,4 +218,59 @@ describe('preload model-response compatibility', () => {
     expect(fixture.getModels).not.toHaveBeenCalled();
     expect(xhr.responseText).toBe(original);
   });
+
+  it.each(['fetch', 'xhr'])('preserves authoritative proxy effort variants without duplicate injection through %s', async (transport) => {
+    const models = ['low', 'medium', 'high'].map((effort, index) => ({
+      ...customModel, name: `models/effort-${effort}`, displayName: `Example ${effort}`,
+      nativeCatalogId: `custom-effort-${effort}-identity`, nativeModelId: `MODEL_PLACEHOLDER_M${30 + index}`,
+      nativePickerAvailable: true,
+    }));
+    const catalog = { models: Object.fromEntries(models.map((model) => [model.nativeCatalogId, {
+      displayName: model.displayName, model: model.nativeModelId,
+      supportsImages: true, maxTokens: 32000, quotaInfo: { remainingFraction: 0.25 },
+    }])) };
+    const responseText = JSON.stringify(catalog);
+    const original = new Response(responseText, { headers: { 'content-type': 'application/json' } });
+    const fixture = createFixture(original, models);
+    if (transport === 'fetch') {
+      const response = await fixture.window.fetch(modelsUrl);
+      expect(response).toBe(original);
+      expect(await response.json()).toEqual(catalog);
+    } else {
+      const xhr = new fixture.TestXHR();
+      xhr.responseText = responseText;
+      xhr.open('GET', modelsUrl);
+      xhr.send();
+      await new Promise((resolve) => setImmediate(resolve));
+      xhr.complete();
+      expect(xhr.responseText).toBe(responseText);
+    }
+  });
+
+  it('uses IPC-assigned identities and never guesses for an unavailable native picker slot', async () => {
+    const fixture = createFixture(new Response('{"models":{}}', { headers: { 'content-type': 'application/json' } }), [
+      { ...customModel, nativeCatalogId: 'custom-assigned-id', nativeModelId: 'MODEL_PLACEHOLDER_M640', nativePickerAvailable: true },
+      { ...customModel, name: 'overflow', nativeCatalogId: 'custom-overflow', nativePickerAvailable: false },
+    ]);
+    const result = await (await fixture.window.fetch(modelsUrl)).json();
+    expect(Object.keys(result.models)).toEqual(['custom-assigned-id']);
+    expect(result.models['custom-assigned-id'].model).toBe('MODEL_PLACEHOLDER_M640');
+  });
+
+  it('does not invent a shared legacy alias for older IPC effort variants', async () => {
+    const original = new Response('{"models":{}}', { headers: { 'content-type': 'application/json' } });
+    const fixture = createFixture(original, [customModel, { ...customModel, name: 'another-effort' }]);
+    expect(await fixture.window.fetch(modelsUrl)).toBe(original);
+  });
+
+  it('disambiguates labels in plain JSON fallback while preserving native and already-injected entries', async () => {
+    const native = { displayName: 'Example', model: 'NATIVE_MODEL' };
+    const fixture = createFixture(new Response(JSON.stringify({ models: { native } }), { headers: { 'content-type': 'application/json' } }), [
+      { ...customModel, name: 'models/one', nativeCatalogId: 'custom-one', nativeModelId: 'MODEL_PLACEHOLDER_M640', nativePickerAvailable: true },
+      { ...customModel, name: 'models/two', nativeCatalogId: 'custom-two', nativeModelId: 'MODEL_PLACEHOLDER_M641', nativePickerAvailable: true },
+    ]);
+    const result = await (await fixture.window.fetch(modelsUrl)).json();
+    expect(result.models.native).toEqual(native);
+    expect(new Set(Object.values(result.models).map((entry: any) => entry.displayName)).size).toBe(3);
+  });
 });

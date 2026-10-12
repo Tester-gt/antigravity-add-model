@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Configure the IDE's declared endpoint setting without modifying vendor code. */
+/** Configure a verified IDE endpoint setting without modifying vendor code. */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,10 @@ const SETTING = 'jetski.cloudCodeUrl';
 const SERVICE = fileURLToPath(new URL('./desktop-service.mjs', import.meta.url));
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_SETTINGS = 4 * 1024 * 1024;
+// IDE 2.5.5 consumes this hidden setting in its core and language-server
+// launcher, although the bundled extension does not contribute it as a setting.
+// Keep this exception limited to the official release actually inspected.
+const CORE_ENDPOINT_RELEASE = 'ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8';
 const exec = promisify(execFile);
 function fail(code, message) { throw Object.assign(new Error(`${code}: ${message}`), { code }); }
 function exists(filename) {
@@ -143,6 +147,31 @@ function jsonFile(filename) {
   noLinks(filename);
   try { return JSON.parse(fs.readFileSync(filename, 'utf8')); } catch { fail('UNSUPPORTED_IDE', `Cannot read ${filename}.`); }
 }
+function coreEndpointSupport(app, pkg, product) {
+  if (pkg.version !== '1.107.0' || product.ideVersion !== '2.5.5' || product.commit !== CORE_ENDPOINT_RELEASE ||
+      product.nameShort !== 'Antigravity IDE' || product.applicationName !== 'antigravity-ide') return false;
+  const extensionRoot = path.join(app, 'extensions/antigravity');
+  const manifest = path.join(extensionRoot, 'package.json');
+  if (!exists(manifest)) return false;
+  const extension = jsonFile(manifest);
+  if (extension.name !== 'antigravity' || extension.publisher !== 'google' ||
+      extension.main !== './dist/extension.js') return false;
+  const sources = [path.join(app, 'out/main.js'), path.join(extensionRoot, 'dist/extension.js')];
+  const text = [];
+  for (const filename of sources) {
+    noLinks(filename);
+    if (!exists(filename)) return false;
+    const stat = fs.statSync(filename);
+    if (!stat.isFile() || stat.size > 64 * 1024 * 1024) return false;
+    text.push(fs.readFileSync(filename, 'utf8'));
+  }
+  const [core, launcher] = text;
+  return core.includes('cloudCodeUrlOverride:this._configurationService.getValue("jetski.cloudCodeUrl")') &&
+    core.includes('this.makePostRequest("v1internal:fetchAvailableModels",') &&
+    /\.client\.setCloudCodeURL\([^;]{0,200}\{url:await this\.getCloudCodeUrl\(\)\}/.test(core) &&
+    /const ([\w$]+)=await [\w$]+\.getCloudCodeUrl\(\);[\w$]+\.push\("--cloud_code_endpoint",\1\)/.test(launcher) &&
+    launcher.includes('.push("--subclient_type","ide")');
+}
 export function inspectIde(options = {}) {
   const platform = options.platform || process.platform;
   const env = options.env || process.env;
@@ -177,13 +206,15 @@ export function inspectIde(options = {}) {
         if (config?.properties?.[SETTING]?.type === 'string') declaredBy = name;
       }
     }
-    if (!declaredBy) fail('UNSUPPORTED_IDE', `This installation does not declare ${SETTING}; no files changed.`);
+    if (!declaredBy && coreEndpointSupport(app, pkg, product)) declaredBy = 'core:antigravity-ide-2.5.5';
+    if (!declaredBy) fail('UNSUPPORTED_IDE', `This installation does not declare ${SETTING} or match a verified core endpoint implementation; no files changed.`);
     const userRoot = platform === 'win32' ? path.join(env.APPDATA || path.join(home, 'AppData/Roaming'), product.nameShort)
       : platform === 'darwin' ? path.join(home, 'Library/Application Support', product.nameShort)
         : path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), product.nameShort);
     const settings = path.resolve(options.settings || path.join(userRoot, 'User/settings.json'));
     noLinks(settings);
-    return { resources: path.resolve(resources), app, settings, version: String(pkg.version || 'unknown'), product, declaredBy, platform };
+    return { resources: path.resolve(resources), app, settings, version: String(pkg.version || 'unknown'),
+      ideVersion: typeof product.ideVersion === 'string' ? product.ideVersion : undefined, product, declaredBy, platform };
   }
   fail('IDE_NOT_FOUND', 'No supported IDE found. Pass --resources PATH and, for a custom profile, --settings FILE.');
 }
@@ -237,7 +268,8 @@ export function configureIde(options = {}) {
   let state = loadState(info);
   if (action !== 'apply' && options.port === undefined && state) endpoint = state.endpoint;
   let now = current(info);
-  const summary = { action, resources: info.resources, settings: info.settings, version: info.version, endpoint, declaredBy: info.declaredBy };
+  const summary = { action, resources: info.resources, settings: info.settings, version: info.version,
+    ideVersion: info.ideVersion, endpoint, declaredBy: info.declaredBy };
   const applied = state?.status !== 'restored' && !!state && now.endpoint === state.endpoint;
   if (action === 'check' || action === 'status') return { ...summary, applied, status: applied ? 'configured' : state?.status === 'active' ? 'conflict' : 'unconfigured', managedEndpoint: state?.endpoint };
   const names = paths(info);
@@ -326,7 +358,9 @@ export async function launchIde(options = {}, hooks = {}) {
   const start = hooks.startService || (async () => { await exec(process.execPath, args, { windowsHide: true, timeout: 30000, maxBuffer: 256 * 1024 }); });
   await start({ port: state.port, dataDir: options.dataDir });
   const launch = hooks.launch || (async () => {
-    const child = spawn(executable, launchArgs, { detached: true, stdio: 'ignore', windowsHide: true });
+    // This is the interactive IDE, not the background service: SW_HIDE leaves
+    // Electron's first restored window invisible on Windows.
+    const child = spawn(executable, launchArgs, { detached: true, stdio: 'ignore', windowsHide: false });
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
     child.unref();
   });

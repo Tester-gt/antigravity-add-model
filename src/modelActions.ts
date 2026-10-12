@@ -1,18 +1,49 @@
 /** Transport-independent addon actions shared by Electron IPC and the local IDE manager. */
 import type { createModelManager } from './modelManagement';
 import { getDiagnostics, clearDiagnostics, getRecentModelNames } from './diagnostics';
+import * as path from 'node:path';
+import { allocateModelIdentities } from './modelIdentity';
 
 export function createModelActions(
   manager: ReturnType<typeof createModelManager>,
 ): Record<string, (...args: unknown[]) => unknown> {
   return {
     'storage:get-custom-models': () => {
+      const models = manager.store.list();
+      // The proxy and both management transports share the same persistent
+      // native identity registry. Do not regenerate enum IDs in the renderer.
+      let identities: ReturnType<typeof allocateModelIdentities> = [];
+      let identityError: string | undefined;
+      try {
+        identities = allocateModelIdentities(path.dirname(manager.store.filename), models);
+      } catch (error) {
+        // Listing/editing saved providers remains possible when the identity
+        // registry is unavailable; native injection must fail closed.
+        identityError =
+          (error instanceof Error ? error.message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 512) : '') ||
+          'Native model identity metadata is unavailable. Retry after resolving the local metadata error.';
+      }
+      const byName = new Map(identities.map((identity) => [identity.name, identity]));
       const recent = getRecentModelNames();
       const rank = (name: string) => {
         const index = recent.indexOf(name);
         return index < 0 ? recent.length : index;
       };
-      return manager.store.list().sort((a, b) => rank(a.name) - rank(b.name));
+      return models
+        .map((model) => {
+          const identity = byName.get(model.name);
+          return {
+            ...model,
+            nativeCatalogId: identity?.catalogId,
+            nativeModelId: identity?.placeholderId,
+            nativePickerAvailable: !!identity?.placeholderId,
+            nativePickerError: identity?.placeholderId
+              ? undefined
+              : identityError ||
+                'Native model picker capacity reached; direct API alias remains available. 651 supported slots include native reservations and retained deleted models.',
+          };
+        })
+        .sort((a, b) => rank(a.name) - rank(b.name));
     },
     'storage:save-custom-model': manager.saveModel,
     'storage:delete-custom-model': (name: string) => {

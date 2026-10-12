@@ -56,10 +56,14 @@ let startingProxy = null;
 let stoppingProxy = null;
 let serviceDataDirectory;
 let shutdownGraceMs;
+let cloudCodeRouting;
 // Shared cross-turn state
 const shared_1 = require("./proxy/shared");
 // Model configuration & capability detection
 const modelUtils_1 = require("./proxy/modelUtils");
+const cloudCodeRouting_1 = require("./proxy/cloudCodeRouting");
+const modelCatalog_1 = require("./proxy/modelCatalog");
+const modelIdentity_1 = require("./modelIdentity");
 // Custom request transport and model storage
 const customRequest_1 = require("./proxy/customRequest");
 const modelStore_1 = require("./modelStore");
@@ -68,32 +72,88 @@ const listen_1 = require("./proxy/listen");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const cryptoStore = require('./cryptoStore');
 // ─── Model Helpers ────────────────────────────────────────────────────────
-function generateModelPlaceholderId(model) {
-    const input = (model.displayName || model.name || 'custom-model').toLowerCase();
-    let hash = 5381;
-    for (let i = 0; i < input.length; i++) {
-        hash = (hash << 5) + hash + input.charCodeAt(i);
-        hash = hash & hash; // Force 32-bit integer
-    }
-    const placeholderNum = 400 + (Math.abs(hash) % 200);
-    return `MODEL_PLACEHOLDER_M${placeholderNum}`;
-}
 function getCustomModelsPath() {
     const geminiDir = serviceDataDirectory || path.join(require('electron').app.getPath('home'), '.gemini', 'antigravity');
     return path.join(geminiDir, 'custom_models.json');
 }
-function toSlug(model) {
-    return ('custom-' +
-        (model.externalModelName || model.name)
-            .replace(/^models\//, '')
-            .replace(/[^a-zA-Z0-9]+/g, '-')
-            .replace(/^-+|-+$/g, '')
-            .toLowerCase());
+function modelIdentities(models, upstream) {
+    try {
+        // Include disabled entries so toggling an effort variant cannot reassign another model's identity.
+        const saved = (0, modelStore_1.readModelConfig)(getCustomModelsPath()).filter((model) => typeof model.name === 'string' && model.name);
+        const configured = [...new Map([...saved, ...models].map((model) => [model.name, model])).values()];
+        return new Map((0, modelIdentity_1.allocateModelIdentities)(path.dirname(getCustomModelsPath()), configured, upstream).map((identity) => [
+            identity.name,
+            identity,
+        ]));
+    }
+    catch (error) {
+        electron_log_1.default.error('[Proxy] Native model identities unavailable; custom models remain accessible by their direct aliases:', error);
+        return new Map(models.map((model) => [model.name, { name: model.name, catalogId: (0, modelCatalog_1.catalogModelSlug)(model, models) }]));
+    }
+}
+function matchCustomModel(models, ...selectors) {
+    const identities = modelIdentities(models);
+    // Named aliases remain available even when the finite native enum pool is exhausted.
+    for (const selector of selectors) {
+        if (typeof selector !== 'string')
+            continue;
+        const exact = models.find((model) => model.name === selector);
+        if (exact)
+            return exact;
+        const named = models.find((model) => identities.get(model.name)?.catalogId === selector.replace(/^models\//, '') ||
+            (0, modelCatalog_1.localModelSlug)(model) === selector.replace(/^models\//, ''));
+        if (named)
+            return named;
+    }
+    return models.find((model) => {
+        const identity = identities.get(model.name);
+        return (identity?.placeholderId &&
+            selectors.some((selector) => selector === identity.placeholderId ||
+                selector === `models/${identity.placeholderId}` ||
+                selector === identity.placeholderValue));
+    });
+}
+function customCloudCodeCatalog(upstream = {}) {
+    const models = loadCustomModels();
+    const identities = modelIdentities(models, upstream);
+    const labels = (0, modelCatalog_1.catalogDisplayNames)(models, upstream);
+    return (0, modelCatalog_1.mergeCloudCodeCatalog)(upstream, models
+        .filter((model) => identities.get(model.name)?.placeholderId)
+        .map((model) => {
+        const identity = identities.get(model.name);
+        const slug = identity.catalogId;
+        const cap = (0, modelUtils_1.detectModelCapabilities)(model);
+        const capabilities = getAdvertisedModelCapabilities(model);
+        return {
+            slug,
+            mapEntry: {
+                displayName: labels.get(model.name),
+                ...capabilities,
+                recommended: true,
+                maxTokens: cap.maxTokens,
+                maxOutputTokens: cap.maxOutputTokens,
+                tokenizerType: 'LLAMA_WITH_SPECIAL',
+                model: identity.placeholderId,
+                apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+                modelProvider: 'MODEL_PROVIDER_GOOGLE',
+            },
+            listEntry: {
+                name: 'models/' + slug,
+                version: '1.0',
+                displayName: labels.get(model.name),
+                description: model.description,
+                ...capabilities,
+                inputTokenLimit: cap.maxTokens,
+                outputTokenLimit: cap.maxOutputTokens,
+                supportedGenerationMethods: ['generateContent', 'countTokens'],
+            },
+        };
+    }));
 }
 function getAdvertisedModelCapabilities(model) {
     const cap = (0, modelUtils_1.detectModelCapabilities)(model);
-    const nativeGoogle = !model.gateway && (model.apiFormat === 'google' ||
-        (!model.apiFormat && ['google', 'google-cloudcode'].includes(model.provider)));
+    const nativeGoogle = !model.gateway &&
+        (model.apiFormat === 'google' || (!model.apiFormat && ['google', 'google-cloudcode'].includes(model.provider)));
     return {
         supportsImages: cap.supportsImages,
         supportsThinking: cap.isThinking,
@@ -178,14 +238,18 @@ function loadCustomModels() {
         const unprotected = (value) => typeof value === 'string' && value && value !== 'none' && !/^(enc:|fallback:|local-gcm:)/.test(value);
         const needsMigration = models.some((m) => (!m.encrypted && unprotected(m.apiKey)) ||
             (!m.encryptedHeaders && Object.values(m.customHeaders || {}).some(unprotected)) ||
-            (!m.encryptedGoogleAccounts && (m.googleAccounts || []).some((account) => [account.accessToken, account.refreshToken, account.clientSecret].some(unprotected))));
+            (!m.encryptedGoogleAccounts &&
+                (m.googleAccounts || []).some((account) => [account.accessToken, account.refreshToken, account.clientSecret].some(unprotected))));
         if (needsMigration) {
             electron_log_1.default.info('[Proxy] Plaintext custom_models.json detected. Migrating to encrypted format...');
             cryptoStore.backupFile(filePath);
             const encryptedModels = cryptoStore.encryptModels(models);
             for (const model of encryptedModels) {
                 if (model.customHeaders && !model.encryptedHeaders) {
-                    model.customHeaders = Object.fromEntries(Object.entries(model.customHeaders).map(([name, value]) => [name, unprotected(value) ? cryptoStore.encryptString(value) : value]));
+                    model.customHeaders = Object.fromEntries(Object.entries(model.customHeaders).map(([name, value]) => [
+                        name,
+                        unprotected(value) ? cryptoStore.encryptString(value) : value,
+                    ]));
                     model.encryptedHeaders = true;
                 }
                 if (model.googleAccounts && !model.encryptedGoogleAccounts) {
@@ -268,18 +332,37 @@ function loadCustomModels() {
     }
 }
 // ─── Google Proxy ─────────────────────────────────────────────────────────
+function forwardingHeaders(source) {
+    const headers = { ...source };
+    const nominated = String(headers.connection || '')
+        .split(',')
+        .map((name) => name.trim().toLowerCase());
+    for (const name of [
+        ...nominated,
+        'connection',
+        'keep-alive',
+        'transfer-encoding',
+        'te',
+        'trailer',
+        'upgrade',
+        'proxy-authenticate',
+        'proxy-authorization',
+    ]) {
+        delete headers[name];
+    }
+    return headers;
+}
 function proxyToGoogle(req, res, reqBody) {
     const isCloudCodeUrl = req.url.includes('v1internal') || req.url.includes('daily-cloudcode');
     const targetUrl = isCloudCodeUrl
-        ? 'https://daily-cloudcode-pa.googleapis.com'
+        ? cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com'
         : 'https://generativelanguage.googleapis.com';
     const parsedUrl = new URL(req.url, targetUrl);
-    const headers = {
-        ...req.headers,
-    };
-    headers['host'] = isCloudCodeUrl ? 'daily-cloudcode-pa.googleapis.com' : 'generativelanguage.googleapis.com';
-    delete headers['connection'];
-    delete headers['keep-alive'];
+    const headers = forwardingHeaders(req.headers);
+    headers['host'] = parsedUrl.host;
+    // Incoming request bodies have already been buffered and decoded by Node.
+    // Never replay their chunked wire framing together with a content length.
+    headers['content-length'] = String(reqBody.length);
     const isGeneration = req.url.includes('generateContent') || req.url.includes('streamGenerateContent');
     const shouldBufferAndModify = isCloudCodeUrl && !isGeneration;
     if (shouldBufferAndModify) {
@@ -321,11 +404,19 @@ function proxyToGoogle(req, res, reqBody) {
                 }
                 electron_log_1.default.info(`[Proxy] Response for ${req.url} (status: ${proxyRes.statusCode}, encoding: ${encoding}, length: ${text.length})`);
                 // P0-3: Response body content is NOT logged to disk. Only metadata.
+                if (cloudCodeRouting && parsedUrl.pathname === '/v1internal:loadCodeAssist') {
+                    try {
+                        cloudCodeRouting.observe(req.headers, proxyRes.statusCode || 500, JSON.parse(text));
+                    }
+                    catch {
+                        /* Invalid responses must not change the account's upstream routing. */
+                    }
+                }
                 const proxyHost = req.headers.host || 'localhost';
                 text = text.replace(/https:(\/\/)daily-cloudcode-pa\.googleapis\.com/g, `http:$1${proxyHost}`);
                 text = text.replace(/https:(\/\/)cloudcode-pa\.googleapis\.com/g, `http:$1${proxyHost}`);
                 text = text.replace(/https:(\/\/)generativelanguage\.googleapis\.com/g, `http:$1${proxyHost}`);
-                const modifiedHeaders = { ...proxyRes.headers };
+                const modifiedHeaders = forwardingHeaders(proxyRes.headers);
                 delete modifiedHeaders['content-encoding'];
                 const modifiedBuffer = Buffer.from(text, 'utf-8');
                 modifiedHeaders['content-length'] = String(modifiedBuffer.length);
@@ -334,7 +425,7 @@ function proxyToGoogle(req, res, reqBody) {
             });
         }
         else {
-            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            res.writeHead(proxyRes.statusCode || 200, forwardingHeaders(proxyRes.headers));
             proxyRes.pipe(res);
         }
     });
@@ -365,7 +456,8 @@ async function resolveFileData(body, reqHeaders) {
             // Keep image bytes/URLs intact for the wire-format translator. In particular,
             // never decode a binary image as UTF-8 or send incoming Google credentials
             // to an arbitrary image URL. Remote images must be accessible to the provider.
-            if ((typeof fd.mimeType === 'string' && /^image\//i.test(fd.mimeType.trim())) || /^data:image\//i.test(fd.fileUri))
+            if ((typeof fd.mimeType === 'string' && /^image\//i.test(fd.mimeType.trim())) ||
+                /^data:image\//i.test(fd.fileUri))
                 continue;
             try {
                 const uri = fd.fileUri;
@@ -391,18 +483,24 @@ async function resolveFileData(body, reqHeaders) {
 function downloadFileContent(url, authHeader) {
     return new Promise((resolve, reject) => {
         const u = new URL(url);
-        (u.protocol === 'https:' ? https : http).request({
-            hostname: u.hostname, path: u.pathname + u.search,
-            method: 'GET', headers: { 'Authorization': authHeader }, timeout: 30000,
+        (u.protocol === 'https:' ? https : http)
+            .request({
+            hostname: u.hostname,
+            path: u.pathname + u.search,
+            method: 'GET',
+            headers: { Authorization: authHeader },
+            timeout: 30000,
         }, (res) => {
             if (res.statusCode !== 200) {
                 reject(new Error('HTTP ' + res.statusCode));
                 return;
             }
             let d = '';
-            res.on('data', (c) => d += c.toString());
+            res.on('data', (c) => (d += c.toString()));
             res.on('end', () => resolve(d));
-        }).on('error', reject).end();
+        })
+            .on('error', reject)
+            .end();
     });
 }
 // ─── Custom Model Request Handler ─────────────────────────────────────────
@@ -456,7 +554,14 @@ function parseProto(buf, offset, end) {
             const len = lenVarint.value;
             const children = parseProto(buf, pos, pos + len);
             const hasChildren = children.length > 0;
-            fields.push({ tag, wireType, fieldNum, value: hasChildren ? children : buf.subarray(pos, pos + len), start, end: pos + len });
+            fields.push({
+                tag,
+                wireType,
+                fieldNum,
+                value: hasChildren ? children : buf.subarray(pos, pos + len),
+                start,
+                end: pos + len,
+            });
             pos += len;
         }
         else if (wireType === 1) {
@@ -568,7 +673,7 @@ function handleGetAvailableModelsProxy(res, reqBody, lsUrl) {
         path: lsParsed.pathname + lsParsed.search,
         headers: {
             'Content-Type': 'application/grpc-web+proto',
-            'Accept': 'application/grpc-web+proto',
+            Accept: 'application/grpc-web+proto',
             'Content-Length': String(reqBody.length),
         },
         rejectUnauthorized: false,
@@ -579,6 +684,7 @@ function handleGetAvailableModelsProxy(res, reqBody, lsUrl) {
         lsRes.on('end', () => {
             const responseBuf = Buffer.concat(chunks);
             const customModels = loadCustomModels();
+            const identities = modelIdentities(customModels);
             let modifiedBuf = responseBuf;
             if (customModels.length > 0 && responseBuf.length > 6) {
                 try {
@@ -594,7 +700,9 @@ function handleGetAvailableModelsProxy(res, reqBody, lsUrl) {
                                 const fieldMapping = extractFieldMapping(sampleEntry.value);
                                 const newParts = [msgBody];
                                 for (const m of customModels) {
-                                    const placeholderId = generateModelPlaceholderId(m);
+                                    const placeholderId = identities.get(m.name)?.placeholderId;
+                                    if (!placeholderId)
+                                        continue;
                                     const entry = encodeModelEntryForGetModels('models/' + placeholderId, m.displayName, fieldMapping);
                                     const tagBuf = encodeVarint(modelTag);
                                     const lenBuf = encodeVarint(entry.length);
@@ -733,189 +841,58 @@ function handleRequest(req, res) {
         // 1. Intercept /v1internal:fetchAvailableModels
         if (req.url.includes('/v1internal:fetchAvailableModels')) {
             electron_log_1.default.info('[Proxy] Intercepting fetchAvailableModels request');
-            const targetUrl = 'https://daily-cloudcode-pa.googleapis.com';
+            const targetUrl = cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com';
             const parsedUrl = new URL(req.url, targetUrl);
-            const fwdHeaders = {
-                ...req.headers,
-            };
-            fwdHeaders['host'] = 'daily-cloudcode-pa.googleapis.com';
-            delete fwdHeaders['connection'];
-            delete fwdHeaders['keep-alive'];
+            const fwdHeaders = forwardingHeaders(req.headers);
+            fwdHeaders['host'] = parsedUrl.host;
+            fwdHeaders['content-length'] = String(fullBody.length);
             delete fwdHeaders['accept-encoding'];
             const fwdOptions = {
                 method: req.method,
                 headers: fwdHeaders,
             };
-            const googleReq = https.request(parsedUrl, fwdOptions, (googleRes) => {
-                // P0-5: Timeout for fetchAvailableModels forward request (30s)
-                googleReq.setTimeout(30000, () => {
-                    electron_log_1.default.error('[Proxy] fetchAvailableModels forward request timed out');
-                    googleReq.destroy();
-                    if (!res.headersSent) {
-                        const customModels = loadCustomModels();
-                        const mappedCustom = {};
-                        customModels.forEach((m) => {
-                            const slug = toSlug(m);
-                            mappedCustom[slug] = {
-                                displayName: m.displayName,
-                                ...getAdvertisedModelCapabilities(m),
-                                maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
-                                maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
-                                model: generateModelPlaceholderId(m),
-                                apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                                modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                            };
-                        });
-                        res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ models: mappedCustom }));
-                    }
-                });
-                let googleBody = '';
-                googleRes.on('data', (chunk) => (googleBody += chunk));
-                googleRes.on('end', () => {
-                    try {
-                        electron_log_1.default.info(`[Proxy] fetchAvailableModels response status: ${googleRes.statusCode}, body length: ${googleBody.length}`);
-                        const googleJson = JSON.parse(googleBody);
-                        const customModels = loadCustomModels();
-                        electron_log_1.default.info(`[Proxy] Loaded custom models count: ${customModels.length}`);
-                        const mergeModels = (target) => {
-                            if (Array.isArray(target)) {
-                                const mapped = customModels.map((m) => {
-                                    const cap = (0, modelUtils_1.detectModelCapabilities)(m, true);
-                                    return {
-                                        name: 'models/' + generateModelPlaceholderId(m),
-                                        version: '1.0',
-                                        displayName: m.displayName,
-                                        description: m.description,
-                                        ...getAdvertisedModelCapabilities(m),
-                                        inputTokenLimit: cap.maxTokens,
-                                        outputTokenLimit: cap.maxOutputTokens,
-                                        supportedGenerationMethods: ['generateContent', 'countTokens'],
-                                        temperature: cap.isThinking ? undefined : 0.7,
-                                        topP: cap.isThinking ? undefined : 0.9,
-                                        topK: cap.isThinking ? undefined : 40,
-                                    };
-                                });
-                                return [...mapped, ...target];
-                            }
-                            else if (target && typeof target === 'object') {
-                                const result = { ...target };
-                                customModels.forEach((m) => {
-                                    const slug = toSlug(m);
-                                    const cap = (0, modelUtils_1.detectModelCapabilities)(m, true);
-                                    const entry = {
-                                        displayName: m.displayName,
-                                        ...getAdvertisedModelCapabilities(m),
-                                        recommended: true,
-                                        maxTokens: cap.maxTokens,
-                                        maxOutputTokens: cap.maxOutputTokens,
-                                        tokenizerType: 'LLAMA_WITH_SPECIAL',
-                                        model: generateModelPlaceholderId(m),
-                                        apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                                        modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                                    };
-                                    result[slug] = entry;
-                                    m._slug = slug;
-                                    electron_log_1.default.info(`[Proxy] Custom model "${m.displayName}" => slug: ${slug} => model: ${generateModelPlaceholderId(m)} => thinking: ${cap.isThinking} => images: ${cap.supportsImages}`);
-                                });
-                                return result;
-                            }
-                            return target;
-                        };
-                        let merged = false;
-                        if (googleJson.models) {
-                            googleJson.models = mergeModels(googleJson.models);
-                            merged = true;
-                        }
-                        if (googleJson.availableModels) {
-                            googleJson.availableModels = mergeModels(googleJson.availableModels);
-                            merged = true;
-                        }
-                        if (googleJson.available_models) {
-                            googleJson.available_models = mergeModels(googleJson.available_models);
-                            merged = true;
-                        }
-                        if (!merged) {
-                            const modelsMap = {};
-                            customModels.forEach((m) => {
-                                const slug = toSlug(m);
-                                modelsMap[slug] = {
-                                    displayName: m.displayName,
-                                    ...getAdvertisedModelCapabilities(m),
-                                    recommended: true,
-                                    maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
-                                    maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
-                                    tokenizerType: 'LLAMA_WITH_SPECIAL',
-                                    model: generateModelPlaceholderId(m),
-                                    apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                                    modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                                };
-                                m._slug = slug;
-                            });
-                            googleJson.models = modelsMap;
-                        }
-                        // Inject custom model slugs into agentModelSorts
-                        const customSlugs = customModels.map((m) => m._slug).filter(Boolean);
-                        if (customSlugs.length > 0) {
-                            if (googleJson.agentModelSorts && Array.isArray(googleJson.agentModelSorts)) {
-                                googleJson.agentModelSorts.forEach((sort) => {
-                                    if (sort.groups && Array.isArray(sort.groups)) {
-                                        sort.groups.forEach((group) => {
-                                            if (group.modelIds && Array.isArray(group.modelIds)) {
-                                                customSlugs.forEach((slug) => {
-                                                    if (!group.modelIds.includes(slug)) {
-                                                        group.modelIds.push(slug);
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    }
-                                });
-                            }
-                        }
-                        res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify(googleJson));
-                    }
-                    catch (err) {
-                        electron_log_1.default.error('[Proxy] Parsing fetchAvailableModels failed, returning custom models:', err);
-                        const customModels = loadCustomModels();
-                        const mappedCustom = {};
-                        customModels.forEach((m) => {
-                            const slug = toSlug(m);
-                            mappedCustom[slug] = {
-                                displayName: m.displayName,
-                                ...getAdvertisedModelCapabilities(m),
-                                maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
-                                maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
-                                model: generateModelPlaceholderId(m),
-                                apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                                modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                            };
-                        });
-                        res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ models: mappedCustom }));
-                    }
-                });
-            });
-            googleReq.on('error', (err) => {
-                electron_log_1.default.error('[Proxy] Forwarding fetchAvailableModels failed:', err);
-                const customModels = loadCustomModels();
-                const mappedCustom = {};
-                customModels.forEach((m) => {
-                    const slug = toSlug(m);
-                    mappedCustom[slug] = {
-                        displayName: m.displayName,
-                        ...getAdvertisedModelCapabilities(m),
-                        maxTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxTokens,
-                        maxOutputTokens: (0, modelUtils_1.detectModelCapabilities)(m).maxOutputTokens,
-                        model: generateModelPlaceholderId(m),
-                        apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
-                        modelProvider: 'MODEL_PROVIDER_GOOGLE',
-                    };
-                });
+            let responded = false;
+            const reply = (catalog = {}) => {
+                if (responded || res.headersSent || res.writableEnded || res.destroyed)
+                    return;
+                responded = true;
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ models: mappedCustom }));
+                res.end(JSON.stringify(customCloudCodeCatalog(catalog)));
+            };
+            const googleReq = https.request(parsedUrl, fwdOptions, (googleRes) => {
+                const chunks = [];
+                let length = 0;
+                googleRes.on('data', (chunk) => {
+                    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                    length += bytes.length;
+                    if (length > 8 * 1024 * 1024) {
+                        reply();
+                        googleReq.destroy();
+                        return;
+                    }
+                    chunks.push(bytes);
+                });
+                googleRes.on('error', () => reply());
+                googleRes.on('aborted', () => reply());
+                googleRes.on('end', () => {
+                    if (!googleRes.statusCode || googleRes.statusCode < 200 || googleRes.statusCode >= 300) {
+                        reply();
+                        return;
+                    }
+                    try {
+                        reply(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+                    }
+                    catch {
+                        reply();
+                    }
+                });
             });
+            // Install before headers arrive: an upstream that never sends headers still gets a bounded fallback.
+            googleReq.setTimeout(30000, () => {
+                reply();
+                googleReq.destroy();
+            });
+            googleReq.on('error', () => reply());
             if (fullBody && fullBody.length > 0) {
                 googleReq.write(fullBody);
             }
@@ -960,7 +937,7 @@ function handleRequest(req, res) {
                         const googleJson = JSON.parse(googleBody);
                         const customModels = loadCustomModels();
                         const mappedCustom = customModels.map((m) => ({
-                            name: 'models/' + generateModelPlaceholderId(m),
+                            name: m.name,
                             version: '1.0',
                             displayName: m.displayName,
                             description: m.description,
@@ -985,7 +962,7 @@ function handleRequest(req, res) {
                         electron_log_1.default.error('[Proxy] Google list models failed, returning custom models list only:', err);
                         const customModels = loadCustomModels();
                         const mappedCustom = customModels.map((m) => ({
-                            name: 'models/' + generateModelPlaceholderId(m),
+                            name: m.name,
                             version: '1.0',
                             displayName: m.displayName,
                             description: m.description,
@@ -1022,14 +999,11 @@ function handleRequest(req, res) {
             try {
                 const reqJson = JSON.parse(bodyStr);
                 const modelName = reqJson.model;
-                const modelId = (reqJson.modelId || reqJson.model_id);
+                const modelId = reqJson.modelId ?? reqJson.model_id;
                 electron_log_1.default.info(`[Proxy] Cloud Code generation request model: ${modelName}, modelId: ${modelId}, url: ${req.url}, bodyKeys: ${Object.keys(reqJson).join(',')}`);
-                if (modelName) {
+                if (modelName !== undefined || modelId !== undefined) {
                     const customModels = loadCustomModels();
-                    const matchedCustomModel = customModels.find((m) => {
-                        const enumName = generateModelPlaceholderId(m);
-                        return m.name === modelName || toSlug(m) === modelName || enumName === modelName || enumName === modelId;
-                    });
+                    const matchedCustomModel = matchCustomModel(customModels, modelName, modelId);
                     if (matchedCustomModel) {
                         electron_log_1.default.info(`[Proxy] Intercepting Cloud Code generation for custom model: ${modelName} => ${matchedCustomModel.displayName}`);
                         const isStream = req.url.includes('streamGenerateContent') || req.url.includes('alt=sse');
@@ -1066,13 +1040,7 @@ function handleRequest(req, res) {
                 return;
             }
             const customModels = loadCustomModels();
-            const matchedCustomModel = customModels.find((m) => {
-                const enumName = generateModelPlaceholderId(m);
-                return (m.name === matchedModelName ||
-                    toSlug(m) === matchedModelName ||
-                    enumName === matchedModelName ||
-                    'models/' + enumName === matchedModelName);
-            });
+            const matchedCustomModel = matchCustomModel(customModels, matchedModelName);
             if (matchedCustomModel) {
                 try {
                     const geminiBody = JSON.parse(bodyStr);
@@ -1106,6 +1074,7 @@ async function startProxy(options = {}) {
     }
     serviceDataDirectory = options.dataDirectory ? path.resolve(options.dataDirectory) : undefined;
     shutdownGraceMs = options.shutdownGraceMs;
+    cloudCodeRouting = options.ideCloudCodeRouting ? new cloudCodeRouting_1.CloudCodeRouting() : undefined;
     const requiredPort = options.port ?? (0, listen_1.getRequiredProxyPort)(require('electron').app.getAppPath());
     const newServer = http.createServer((req, res) => {
         if (!options.handleManagement?.(req, res))
@@ -1146,12 +1115,18 @@ function stopProxy() {
         }
         (0, shared_1.stopCleanupInterval)();
         (0, customRequest_1.stopCustomRequests)();
+        cloudCodeRouting?.clear();
         if (server) {
             const closingServer = server;
             await new Promise((resolve) => {
-                const timer = shutdownGraceMs === undefined ? undefined : setTimeout(() => closingServer.closeAllConnections(), shutdownGraceMs);
+                const timer = shutdownGraceMs === undefined
+                    ? undefined
+                    : setTimeout(() => closingServer.closeAllConnections(), shutdownGraceMs);
                 timer?.unref?.();
-                closingServer.close(() => { clearTimeout(timer); resolve(); });
+                closingServer.close(() => {
+                    clearTimeout(timer);
+                    resolve();
+                });
             });
             electron_log_1.default.info('[Proxy] Server stopped');
         }

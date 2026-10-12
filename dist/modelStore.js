@@ -180,6 +180,12 @@ class ModelStore {
         const model = { ...input };
         delete model.originalName;
         delete model.copyFrom;
+        // Management response metadata is allocated locally, never imported or
+        // accepted from an editor payload as an authoritative native identity.
+        delete model.nativeCatalogId;
+        delete model.nativeModelId;
+        delete model.nativePickerAvailable;
+        delete model.nativePickerError;
         if (!model.name?.startsWith('models/'))
             model.name = `models/${model.name || ''}`;
         if (model.name === 'models/')

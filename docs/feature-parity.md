@@ -41,6 +41,7 @@ workspace/session/terminal APIs and mobile clients are a separate runtime.
 | Doctor diagnostics and repair | CLI plus request diagnostics UI | Read-only `npm run doctor`, installer preflight, transactional repair/restore, and a Diagnostics dialog in the existing UI. Installation checks remain CLI; the separate Doctor Electron application is not bundled. |
 | Real model generation test | Available on explicit action | A short, bounded request uses the production translator and reports generated-text success. Separate from the non-generating connection/catalog test; can consume quota. |
 | Recent models / effort presets | Available in model management | Successful real requests determine recent ordering; optional low/medium/high variants are ordinary saved models with stable identities. No automatic tripling of the provider catalog. |
+| Native picker IDs for large catalogs | Persistent allocation | Share authoritative IDs between proxy, desktop and browser manager. The inspected IDE schema has 651 placeholder values; native reservations and retained deleted-model assignments reduce free slots. Overflow keeps direct API aliases available. |
 
 See [customPreload.ts](../src/customPreload.ts),
 [modelManagement.ts](../src/modelManagement.ts),
@@ -103,7 +104,7 @@ configuration, and [gateway/UPSTREAM.md](../gateway/UPSTREAM.md) for attribution
 | Go remote daemon workspaces, terminal, filesystem, live agent sessions / MCP relay | Outside this integration; those `/v2` APIs are not implemented by the gateway. |
 | Mobile/Flutter clients and hosted cloud-agent scheduling | Outside this desktop/proxy/web/remote-provider scope. |
 | Existing standalone app WSL bridge | Preserved from the installed vendor runtime. Custom-model routing still applies only to local desktop sessions; it does not reroute the vendor's WSL language server. |
-| Separate VS Code-based Antigravity IDE | Experimental setting adapter, owned service and browser manager. Requires a recognized unpacked IDE declaring the endpoint setting; native picker/live version compatibility remains unverified. See [IDE setup](ide.md). |
+| Separate VS Code-based Antigravity IDE | Verified IDE 2.5.5 / VS Code 1.107.0 hidden core endpoint support, reversible settings adapter, owned service and browser manager. Live Windows sign-in, native picker selection and streamed chat passed with a local OpenAI-compatible provider. See [IDE validation](ide.md#validation-boundary). |
 | Recovery after supported desktop updates | Version-specific preflight, backups, validated hooks, and rollback; unfamiliar runtime layouts fail before replacement. |
 
 The transport choice is deliberate: preserving the installed desktop runtime
@@ -119,7 +120,13 @@ implementation is absent at this revision. This project supplies its own managed
 launcher; it does not claim the missing bootstrap or perform speculative database
 deletion. `src/proxy/protoInjector.ts` supports a `GetUserStatus` picker hook in the
 reference, but the available source does not establish a working IDE installation
-path for that hook. Our IDE adapter does not inject it.
+path for that hook. The official IDE 2.5.5 source instead builds its native picker
+from `fetchAvailableModels`, sort/group entries and internal unified-state
+updates. Our adapter follows that catalog path and does not inject the older RPC
+hook. The official Windows and Linux artifacts were verified and inspected;
+the Windows IDE completed live Google sign-in, showed the configured model and
+effort variants in its native picker, and displayed a streamed response from a
+local OpenAI-compatible provider through the proxy.
 
 | Remaining reference feature | Boundary |
 | --- | --- |

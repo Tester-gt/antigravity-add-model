@@ -9,6 +9,8 @@ import ts from 'typescript';
 import type { CustomModel } from '../proxy';
 import * as shared from '../proxy/shared';
 import * as modelUtils from '../proxy/modelUtils';
+import * as modelCatalog from '../proxy/modelCatalog';
+import * as modelIdentity from '../modelIdentity';
 import * as customRequest from '../proxy/customRequest';
 import * as modelStore from '../modelStore';
 import * as schemaValidator from '../schemaValidator';
@@ -68,6 +70,9 @@ async function fixture(models: CustomModel[]) {
     'electron-log': { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
     './proxy/shared': shared,
     './proxy/modelUtils': modelUtils,
+    './proxy/modelCatalog': modelCatalog,
+    './proxy/cloudCodeRouting': {},
+    './modelIdentity': modelIdentity,
     './proxy/customRequest': customRequest,
     './modelStore': modelStore,
     './schemaValidator': schemaValidator,

@@ -23,6 +23,7 @@ export const REQUIRED_BUILD_FILES = [
   'modelStore.js',
   'modelManagement.js',
   'modelActions.js',
+  'modelIdentity.js',
   'diagnostics.js',
   'generationProbe.js',
   'googleAccounts.js',
@@ -43,6 +44,8 @@ export const REQUIRED_BUILD_FILES = [
   'proxy/translators/ollama.js',
   'proxy/listen.js',
   'proxy/modelUtils.js',
+  'proxy/modelCatalog.js',
+  'proxy/cloudCodeRouting.js',
   'proxy/translators/utils.js',
   'proxy/translators/images.js',
 ];

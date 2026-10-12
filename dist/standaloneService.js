@@ -177,6 +177,7 @@ async function startStandaloneService(options) {
         dataDirectory: options.dataDirectory,
         handleManagement,
         shutdownGraceMs: 1500,
+        ideCloudCodeRouting: true,
     });
     return { port, stop };
 }
