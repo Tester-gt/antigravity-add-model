@@ -7,6 +7,7 @@ Release history preserved from the project README. Historical entries describe t
 - Restore native Cloud Code routing after proxy restart, bearer refresh or cache expiry by looking up the same account's tier before forwarding generation. Preserve production/daily endpoint selection without retrying generation against another endpoint. Bound discovery time, response size and concurrent cache state; propagate cancellation and explicit discovery failures.
 - Add `list_custom_models` and `delegate_to_model` through an authenticated local MCP server. IDE parents can send isolated text tasks to enabled saved custom models with exact selection, paginated discovery, bounded concurrency and cancellation. This is a text-only worker: it does not add the standalone runtime's native `invoke_subagent` tool, child UI, file access or terminal tools to the IDE.
 - Add `npm run ide:mcp -- apply/status/restore` with comment-preserving edits, integrity-checked backups and conflict-safe recovery, including the IDE's comment-only starter configuration. Document installation, the verified global config location and [live validation limits](docs/ide.md#validation-boundary).
+- Verify the complete flow in Windows IDE 2.5.5: the real Google Gemini 3.8 Flash High parent called both MCP tools after user approval, delegated to a local deterministic custom provider, and displayed its unique verification marker in the final reply. This validates text-only MCP delegation, not native child-agent UI or a paid custom provider.
 
 ### Unreleased — Custom model selection for subagents
 

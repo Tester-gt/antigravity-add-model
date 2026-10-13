@@ -211,17 +211,17 @@ encrypted model persistence, browser management, local generation and lifecycle.
 | Live Windows IDE 2.5.5 streamed chat | An actual IDE `streamGenerateContent` request reached a local OpenAI-compatible `/v1/chat/completions` endpoint, returned HTTP 200 SSE, and rendered `IDE LIVE ROUTE OK` in the native chat. |
 | Live effort variant routing | Selecting the medium variant in the native picker sent `reasoning_effort: "medium"` to the same upstream model and rendered a second successful streamed response. |
 | Live adapter recovery and launch | Restored and reapplied the isolated profile setting; managed launch started the real Windows executable and its owned proxy. The interactive IDE window is shown rather than hidden by the background-service launch flag. |
-| Live Windows IDE 2.5.5 native parent and MCP discovery | Gemini 3.8 Flash High returned HTTP 200 through the account-selected daily endpoint. The MCP manager loaded both `custom-models` tools from its global config; the native model requested `list_custom_models`, reaching the IDE's user-approval dialog. |
+| Live Windows IDE 2.5.5 native parent → custom-model MCP delegation | Completed with the real Google Gemini 3.8 Flash High parent. After the user's one-time approval of each tool, it called `list_custom_models` and `delegate_to_model` with `models/ide-native-child`. The local deterministic OpenAI-compatible provider received `/v1/chat/completions` with the exact child model and no tools; its unique verification marker appeared in the IDE's final parent reply. Both delegation and final native generation returned HTTP 200. This verifies a text-only MCP worker, not native child-agent UI. |
 
 The extracted-function check uses captured message constructors. It verifies the
 vendor selection logic and enum values; it does not substitute for a complete
 protobuf decode or live IDE interaction.
 
 The picker and custom-provider live checks ran on **2026-10-12**; native-parent
-and MCP discovery checks ran on **2026-10-13**, using an isolated Windows profile.
-Custom-provider checks use a local OpenAI-compatible test provider. Linux source inspection and macOS
-installer fixtures are separate checks; their desktop UI flows and paid-provider
-generation were not part of this live run.
+and MCP delegation checks ran on **2026-10-13**, using an isolated Windows profile.
+Custom-provider checks use a local OpenAI-compatible test provider. Linux source
+inspection and macOS installer fixtures are separate checks; their desktop UI
+flows and paid custom-provider generation were not part of this live run.
 
 This release obtains its picker through `fetchAvailableModels` and native
 unified-state updates; it does not require a `GetUserStatus` RPC injection.
