@@ -16,6 +16,10 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> · <a href="README_zh.md">简体中文</a>
+</p>
+
+<p align="center">
   <a href="#installation"><strong>Quick start</strong></a> ·
   <a href="#quick-links">Quick links</a> ·
   <a href="#screenshots">Screenshots</a> ·
