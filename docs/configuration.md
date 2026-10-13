@@ -123,6 +123,42 @@ Old DeepSeek, Kimi, Fireworks, LM Studio, and llama.cpp entries without
 `apiFormat` retain their historical Anthropic format. Select the intended format
 explicitly when migrating a configuration.
 
+## Subagent model selection
+
+When Antigravity exposes the `invoke_subagent` tool, a custom-model conversation
+can choose another enabled configured model through `Subagents[].Model`. Use the
+model's exact saved `name`, such as `models/local-example` from the import above;
+the display label and upstream provider model ID are not interchangeable with
+this name. Configure and enable the target model first, then include its saved
+name when asking the agent to delegate work.
+
+The native values `inherit`, `flash_lite`, `flash`, and `pro` remain available.
+`inherit` (also the default when omitted) follows the calling agent's model,
+including a custom model selected for that subagent. Explicit native tiers keep
+Antigravity's own tier selection. Unknown, ambiguous, or disabled custom model
+selections produce an error instead of silently choosing another model.
+
+The proxy gives each custom-model spawn its own temporary routing marker. The
+child's first request can select its model before the parent receives the tool
+result, and parallel calls do not share a fallback tool-call ID. Markers are
+removed before forwarding the child's prompt to a provider; replayed parent
+history restores the original prompt and `Model` even after switching between
+Gemini, OpenAI-compatible, and Anthropic-compatible providers.
+
+Routing state is held in proxy memory, with a one-hour inactivity limit and up
+to 4,096 entries per routing cache. Start new subagents after restarting the
+proxy or when a route has expired; a child using an unavailable marker reports
+an error. Expired markers in parent tool history are removed so the parent can
+continue and spawn fresh children; its original custom selection can only be
+restored while the corresponding routing state remains available. This feature
+depends on Antigravity supplying the child prompt or a stable conversation
+identity, and does not add subagent tools to clients that
+do not expose them. Automated routing coverage uses local HTTP fixtures. A live
+check on Windows IDE 2.5.5 reached the local parent provider, but that test
+session did not expose `invoke_subagent`; native child spawning could therefore
+not be exercised there. This is separate from the native IDE chat validation
+described in the [IDE guide](ide.md#validation-boundary).
+
 ## Gateway routes
 
 Configure **Remote gateway** with the gateway URL, token, and dashboard URL.

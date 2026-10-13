@@ -51,6 +51,7 @@
 | **模型管理** | 按服务商分组、搜索、编辑、复制、启用/禁用以及模型自动发现。 |
 | **连接主流与本地服务商** | 支持 OpenAI、Anthropic、Gemini、OpenRouter、[Cloudflare Workers AI](docs/providers.md#cloudflare-workers-ai) 等兼容 API；支持 Ollama、LM Studio、vLLM 等本地推理服务。 |
 | **精细化请求调优** | 协议选择、推理/思考（Reasoning）参数设置、上下文/输出长度限制、自定义请求头、超时控制、自动重试、回退模型（Fallback）及熔断器（Circuit Breaker）。 |
+| **选择子代理模型** | 在 `invoke_subagent` 中使用已配置并启用的模型；并行子代理的路由相互独立，切换服务商时保留原始工具调用历史。[配置说明](docs/configuration.md#subagent-model-selection)。 |
 | **Google 账号池支持** | 使用你自己的客户端进行显式 OAuth 登录、加密凭据存储、配额检查、自适应账号轮询以及模型级别的冷却时间管理。 |
 | **直连请求诊断** | 内置诊断工具，可查看近期请求、实测延迟/Token 消耗，并提供显式的轻量生成测试。 |
 | **连接 Antigravity IDE** | 可逆的设置适配器、托管代理启动器与浏览器端模型管理器；已在 Windows IDE 2.5.5 上配合本地 OpenAI 兼容服务商验证原生模型选择器与流式对话。[查看配置指南](docs/ide.md)。 |

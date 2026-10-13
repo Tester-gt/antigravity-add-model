@@ -1,3 +1,5 @@
+import * as subagentRoutingModule from '../proxy/subagentRouting';
+import * as subagentModels from '../proxy/subagentModels';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -90,6 +92,8 @@ function requestModels(
     './proxy/shared': {},
     './proxy/modelUtils': { detectModelCapabilities },
     './proxy/modelCatalog': modelCatalog,
+    './proxy/subagentRouting': subagentRoutingModule,
+    './proxy/subagentModels': subagentModels,
     './proxy/cloudCodeRouting': {},
     './modelIdentity': {
       allocateModelIdentities: (_directory: string, models: IdentityModel[], upstream?: unknown) =>

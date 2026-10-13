@@ -50,6 +50,8 @@ const circuitBreaker_1 = require("./circuitBreaker");
 const requestOptions_1 = require("./requestOptions");
 const shared_1 = require("./shared");
 const utils_1 = require("./translators/utils");
+const subagentRouting_1 = require("./subagentRouting");
+const subagentModels_1 = require("./subagentModels");
 const circuits = new circuitBreaker_1.CircuitBreaker();
 const controllers = new Set();
 const counts = {
@@ -82,6 +84,8 @@ class UpstreamError extends Error {
     }
 }
 function asUpstreamError(error) {
+    if (error instanceof subagentRouting_1.SubagentRoutingError)
+        return new UpstreamError(error.message, error.status, false, 0, false);
     if (error instanceof googleAccounts_1.GoogleAccountError)
         return new UpstreamError(error.message, error.status, false);
     return error instanceof UpstreamError ? error : new UpstreamError('Upstream connection failed.');
@@ -215,6 +219,21 @@ function buildFallbackChain(primary, allModels) {
 }
 /** The sole retry/fallback owner; nothing is retried after any model output was received. */
 async function runCustomModelRequest(res, primary, originalBody, isStream, allModels, cloudEnvelope = true, kind = 'request') {
+    const resolveSubagent = (selector) => (0, subagentModels_1.resolveConfiguredSubagentModel)(allModels, selector)?.name;
+    let prepared;
+    try {
+        prepared = subagentRouting_1.subagentRouting.prepareRequest(originalBody, resolveSubagent);
+        originalBody = prepared.body;
+        if (prepared.modelName)
+            primary = (0, subagentModels_1.resolveConfiguredSubagentModel)(allModels, prepared.modelName);
+    }
+    catch (error) {
+        res.writeHead(error instanceof subagentRouting_1.SubagentRoutingError ? error.status : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            error: { message: error instanceof subagentRouting_1.SubagentRoutingError ? error.message : 'Invalid subagent routing request.' },
+        }));
+        return;
+    }
     const toolSchemas = (0, utils_1.collectToolSchemas)(originalBody);
     const controller = new AbortController();
     const { signal } = controller;
@@ -241,13 +260,15 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
     const writeCandidate = (candidate) => {
         if (signal.aborted || res.destroyed)
             throw new Error('Cancelled');
+        prepared.context.modelName = effectiveModel.name;
+        const routed = subagentRouting_1.subagentRouting.rewriteCandidate(candidate, prepared.context, resolveSubagent);
         if (!res.headersSent)
             res.writeHead(200, {
                 'Content-Type': 'text/event-stream',
                 'Cache-Control': 'no-cache',
                 'X-Accel-Buffering': 'no',
             });
-        res.write(`data: ${JSON.stringify(envelope({ candidates: [candidate] }, cloudEnvelope))}\n\n`);
+        res.write(`data: ${JSON.stringify(envelope({ candidates: [routed] }, cloudEnvelope))}\n\n`);
     };
     try {
         const chain = buildFallbackChain(primary, allModels);
@@ -525,8 +546,10 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                                 writeCandidate(candidate);
                         }
                         else {
+                            prepared.context.modelName = effectiveModel.name;
+                            const routed = subagentRouting_1.subagentRouting.rewriteResponse(mapped, prepared.context, resolveSubagent);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify(envelope(mapped, cloudEnvelope)));
+                            res.end(JSON.stringify(envelope(routed, cloudEnvelope)));
                         }
                     }
                     circuits.succeed(circuitKey);

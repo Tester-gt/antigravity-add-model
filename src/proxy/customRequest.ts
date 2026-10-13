@@ -12,6 +12,8 @@ import { CircuitBreaker } from './circuitBreaker';
 import { applyRequestOptions, GeminiBody, parseRetryAfter, trimContext } from './requestOptions';
 import { activeStreamContexts, modelReasoningContent, modelToolCallIds, stateTimestamps } from './shared';
 import { collectToolSchemas } from './translators/utils';
+import { subagentRouting, SubagentRoutingError } from './subagentRouting';
+import { resolveConfiguredSubagentModel } from './subagentModels';
 
 const circuits = new CircuitBreaker();
 const controllers = new Set<AbortController>();
@@ -47,6 +49,7 @@ class UpstreamError extends Error {
   }
 }
 function asUpstreamError(error: unknown): UpstreamError {
+  if (error instanceof SubagentRoutingError) return new UpstreamError(error.message, error.status, false, 0, false);
   if (error instanceof GoogleAccountError) return new UpstreamError(error.message, error.status, false);
   return error instanceof UpstreamError ? error : new UpstreamError('Upstream connection failed.');
 }
@@ -188,6 +191,21 @@ export async function runCustomModelRequest(
   cloudEnvelope = true,
   kind: 'request' | 'generation-test' = 'request',
 ): Promise<void> {
+  const resolveSubagent = (selector: string) => resolveConfiguredSubagentModel(allModels, selector)?.name;
+  let prepared: ReturnType<typeof subagentRouting.prepareRequest>;
+  try {
+    prepared = subagentRouting.prepareRequest(originalBody, resolveSubagent);
+    originalBody = prepared.body;
+    if (prepared.modelName) primary = resolveConfiguredSubagentModel(allModels, prepared.modelName)!;
+  } catch (error) {
+    res.writeHead(error instanceof SubagentRoutingError ? error.status : 400, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: { message: error instanceof SubagentRoutingError ? error.message : 'Invalid subagent routing request.' },
+      }),
+    );
+    return;
+  }
   const toolSchemas = collectToolSchemas(originalBody);
   const controller = new AbortController();
   const { signal } = controller;
@@ -213,13 +231,15 @@ export async function runCustomModelRequest(
 
   const writeCandidate = (candidate: unknown) => {
     if (signal.aborted || res.destroyed) throw new Error('Cancelled');
+    prepared.context.modelName = effectiveModel.name;
+    const routed = subagentRouting.rewriteCandidate(candidate, prepared.context, resolveSubagent);
     if (!res.headersSent)
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no',
       });
-    res.write(`data: ${JSON.stringify(envelope({ candidates: [candidate] }, cloudEnvelope))}\n\n`);
+    res.write(`data: ${JSON.stringify(envelope({ candidates: [routed] }, cloudEnvelope))}\n\n`);
   };
 
   try {
@@ -540,8 +560,10 @@ export async function runCustomModelRequest(
             if (isStream) {
               for (const candidate of mapped.candidates) writeCandidate(candidate);
             } else {
+              prepared.context.modelName = effectiveModel.name;
+              const routed = subagentRouting.rewriteResponse(mapped, prepared.context, resolveSubagent);
               res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify(envelope(mapped, cloudEnvelope)));
+              res.end(JSON.stringify(envelope(routed, cloudEnvelope)));
             }
           }
           circuits.succeed(circuitKey);

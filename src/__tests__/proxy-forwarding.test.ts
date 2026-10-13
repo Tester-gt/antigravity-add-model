@@ -1,3 +1,5 @@
+import * as subagentRoutingModule from '../proxy/subagentRouting';
+import * as subagentModels from '../proxy/subagentModels';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -67,6 +69,8 @@ async function fixture(upstream: string, ideCloudCodeRouting = false) {
     './proxy/modelUtils': {},
     './proxy/modelCatalog': modelCatalog,
     './modelIdentity': modelIdentity,
+    './proxy/subagentRouting': subagentRoutingModule,
+    './proxy/subagentModels': subagentModels,
     './proxy/cloudCodeRouting': { CloudCodeRouting },
     './proxy/customRequest': { stopCustomRequests: vi.fn() },
     './modelStore': { readModelConfig: () => [] },

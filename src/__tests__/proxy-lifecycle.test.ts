@@ -1,3 +1,5 @@
+import * as subagentRoutingModule from '../proxy/subagentRouting';
+import * as subagentModels from '../proxy/subagentModels';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -82,6 +84,8 @@ function fixture(fixed = true) {
     },
     './proxy/modelUtils': {},
     './proxy/modelCatalog': {},
+    './proxy/subagentRouting': subagentRoutingModule,
+    './proxy/subagentModels': subagentModels,
     './proxy/cloudCodeRouting': {},
     './modelIdentity': {},
     './proxy/customRequest': { stopCustomRequests: vi.fn(), getProxyMetrics: () => ({ requests: 0 }) },

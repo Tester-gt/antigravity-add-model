@@ -49,11 +49,13 @@ export interface CustomModel {
 }
 
 interface GeminiRequestBody {
+  [key: string]: unknown;
   model?: string;
   modelId?: string;
   model_id?: string;
   sessionId?: string;
   conversationId?: string;
+  labels?: Record<string, unknown>;
   request?: GeminiRequestBody;
   systemInstruction?: { parts: { text?: string }[] };
   contents?: {
@@ -110,6 +112,8 @@ import { allocateModelIdentities, ModelIdentity } from './modelIdentity';
 import { runCustomModelRequest, getProxyMetrics, stopCustomRequests } from './proxy/customRequest';
 import { readModelConfig, writeJsonAtomic } from './modelStore';
 import { getRequiredProxyPort, listenProxy } from './proxy/listen';
+import { subagentRouting, SubagentRoutingError } from './proxy/subagentRouting';
+import { resolveConfiguredSubagentModel } from './proxy/subagentModels';
 
 // Dynamic imports (stays require for Electron-specific modules)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1162,26 +1166,53 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         log.info(
           `[Proxy] Cloud Code generation request model: ${modelName}, modelId: ${modelId}, url: ${req.url}, bodyKeys: ${Object.keys(reqJson).join(',')}`,
         );
-        if (modelName !== undefined || modelId !== undefined) {
+        {
           const customModels = loadCustomModels();
-          const matchedCustomModel = matchCustomModel(customModels, modelName, modelId);
+          const actualGeminiBody = { ...((reqJson.request || reqJson) as GeminiRequestBody) };
+          if (typeof reqJson.sessionId === 'string') actualGeminiBody.sessionId = reqJson.sessionId;
+          if (typeof reqJson.conversationId === 'string') actualGeminiBody.conversationId = reqJson.conversationId;
+          if (!actualGeminiBody.labels && reqJson.labels && typeof reqJson.labels === 'object')
+            actualGeminiBody.labels = reqJson.labels as Record<string, unknown>;
+          const prepared = subagentRouting.prepareRequest(
+            actualGeminiBody,
+            (selector) => resolveConfiguredSubagentModel(customModels, selector)?.name,
+          );
+          const matchedCustomModel = prepared.modelName
+            ? resolveConfiguredSubagentModel(customModels, prepared.modelName)
+            : matchCustomModel(customModels, modelName, modelId);
           if (matchedCustomModel) {
             log.info(
               `[Proxy] Intercepting Cloud Code generation for custom model: ${modelName} => ${matchedCustomModel.displayName}`,
             );
             const isStream = req.url!.includes('streamGenerateContent') || req.url!.includes('alt=sse');
-            const actualGeminiBody = { ...((reqJson.request || reqJson) as GeminiRequestBody) };
-            if (typeof reqJson.sessionId === 'string') actualGeminiBody.sessionId = reqJson.sessionId;
-            if (typeof reqJson.conversationId === 'string') actualGeminiBody.conversationId = reqJson.conversationId;
             // Resolve fileData URIs then route to translator
-            resolveFileData(actualGeminiBody, req.headers as Record<string, string | string[] | undefined>).then(() => {
-              handleCustomModelRequest(res, matchedCustomModel, actualGeminiBody, isStream);
+            resolveFileData(
+              prepared.body as GeminiRequestBody,
+              req.headers as Record<string, string | string[] | undefined>,
+            ).then(() => {
+              handleCustomModelRequest(res, matchedCustomModel, prepared.body as GeminiRequestBody, isStream);
             });
             return;
           }
+          // Restore a switched parent's history, keeping the native tool schema.
+          const nativeBody = {
+            ...((reqJson.request || reqJson) as Record<string, unknown>),
+            contents: prepared.body.contents,
+          };
+          const forwarded = reqJson.request ? { ...reqJson, request: nativeBody } : { ...reqJson, ...nativeBody };
+          proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)));
+          return;
         }
       } catch (err) {
+        if (err instanceof SubagentRoutingError) {
+          res.writeHead(err.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: err.message } }));
+          return;
+        }
         log.error('[Proxy] Failed to parse Cloud Code stream body:', err);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Invalid Cloud Code generation request body' } }));
+        return;
       }
     }
 
@@ -1202,21 +1233,41 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         return;
       }
       const customModels = loadCustomModels();
-      const matchedCustomModel = matchCustomModel(customModels, matchedModelName);
-
-      if (matchedCustomModel) {
-        try {
-          const geminiBody = JSON.parse(bodyStr) as GeminiRequestBody;
-          resolveFileData(geminiBody, req.headers as Record<string, string | string[] | undefined>).then(() => {
-            handleCustomModelRequest(res, matchedCustomModel, geminiBody, isStandardStream, false);
+      try {
+        const geminiBody = JSON.parse(bodyStr) as GeminiRequestBody;
+        const prepared = subagentRouting.prepareRequest(
+          geminiBody,
+          (selector) => resolveConfiguredSubagentModel(customModels, selector)?.name,
+        );
+        const matchedCustomModel = prepared.modelName
+          ? resolveConfiguredSubagentModel(customModels, prepared.modelName)
+          : matchCustomModel(customModels, matchedModelName);
+        if (matchedCustomModel) {
+          resolveFileData(
+            prepared.body as GeminiRequestBody,
+            req.headers as Record<string, string | string[] | undefined>,
+          ).then(() => {
+            handleCustomModelRequest(
+              res,
+              matchedCustomModel,
+              prepared.body as GeminiRequestBody,
+              isStandardStream,
+              false,
+            );
           });
           return;
-        } catch (e) {
-          log.error('[Proxy] JSON parse error in request body:', e);
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: { message: 'Invalid JSON request body' } }));
-          return;
         }
+        proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents })));
+        return;
+      } catch (e) {
+        log.error('[Proxy] JSON parse error in request body:', e);
+        res.writeHead(e instanceof SubagentRoutingError ? e.status : 400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: { message: e instanceof SubagentRoutingError ? e.message : 'Invalid JSON request body' },
+          }),
+        );
+        return;
       }
     }
 
@@ -1276,6 +1327,7 @@ export function stopProxy(): Promise<void> {
     }
     stopCleanupInterval();
     stopCustomRequests();
+    subagentRouting.clear();
     cloudCodeRouting?.clear();
     if (server) {
       const closingServer = server;

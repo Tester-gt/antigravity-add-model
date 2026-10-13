@@ -1,3 +1,5 @@
+import * as subagentRoutingModule from '../proxy/subagentRouting';
+import * as subagentModels from '../proxy/subagentModels';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -71,6 +73,8 @@ async function fixture(models: CustomModel[]) {
     './proxy/shared': shared,
     './proxy/modelUtils': modelUtils,
     './proxy/modelCatalog': modelCatalog,
+    './proxy/subagentRouting': subagentRoutingModule,
+    './proxy/subagentModels': subagentModels,
     './proxy/cloudCodeRouting': {},
     './modelIdentity': modelIdentity,
     './proxy/customRequest': customRequest,
