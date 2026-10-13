@@ -34,14 +34,17 @@
     "ide:restore": "node scripts/ide.mjs restore",
     "ide:status": "node scripts/ide.mjs status",
     "ide:launch": "node scripts/ide.mjs launch",
+    "ide:mcp": "node scripts/ide-mcp.mjs",
     "proxy:start": "node scripts/desktop-service.mjs start",
     "proxy:stop": "node scripts/desktop-service.mjs stop",
     "proxy:status": "node scripts/desktop-service.mjs status",
+    "model:mcp": "node scripts/model-delegation-mcp.mjs",
     "patch:check": "node scripts/deploy.mjs --check",
     "patch:restore": "node scripts/deploy.mjs --restore",
     "test:integration": "node scripts/integration-smoke.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
     "chrome-devtools-mcp": "^0.23.0",
     "electron-log": "^5.4.3",
     "electron-updater": "^6.8.3",

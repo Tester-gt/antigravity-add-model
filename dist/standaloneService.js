@@ -43,6 +43,7 @@ const codec = __importStar(require("./cryptoStore"));
 const modelManagement_1 = require("./modelManagement");
 const modelActions_1 = require("./modelActions");
 const proxy_1 = require("./proxy");
+const modelDelegation_1 = require("./modelDelegation");
 function equalToken(actual, expected) {
     if (typeof actual !== 'string')
         return false;
@@ -76,6 +77,7 @@ async function startStandaloneService(options) {
         await (0, proxy_1.stopProxy)();
     };
     const actions = (0, modelActions_1.createModelActions)(manager);
+    const handleDelegation = (0, modelDelegation_1.createModelDelegation)(proxy_1.loadCustomModels);
     const preload = fs.readFileSync(path.join(__dirname, 'customPreload.js'), 'utf8');
     const appScript = `${BRIDGE}\n(function(exports,require){\n${preload}\n})({},name=>{if(name==='electron')return {ipcRenderer:bridge};throw new Error('Unsupported module');});`;
     const respond = (res, status, value) => {
@@ -109,6 +111,8 @@ async function startStandaloneService(options) {
             respond(res, 401, { error: 'Open the authenticated management URL from proxy:start' });
             return true;
         }
+        if (handleDelegation(req, res))
+            return true;
         if (req.method === 'GET' && req.url === '/_addon/health') {
             respond(res, 200, {
                 service: 'antigravity-model-proxy',

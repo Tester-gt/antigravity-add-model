@@ -50,6 +50,7 @@ export interface ProxyStartOptions {
     /** IDE account bootstrap uses PROD, then the account's declared Cloud Code tier. */
     ideCloudCodeRouting?: boolean;
 }
+export declare function loadCustomModels(): CustomModel[];
 export declare function startProxy(options?: ProxyStartOptions): Promise<number>;
 export declare function stopProxy(): Promise<void>;
 export declare function getProxyPort(): number;

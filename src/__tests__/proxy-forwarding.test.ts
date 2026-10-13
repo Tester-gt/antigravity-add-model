@@ -40,7 +40,11 @@ async function serve(handler: http.RequestListener): Promise<string> {
   return `http://127.0.0.1:${await listenProxy(server, 0)}`;
 }
 
-async function fixture(upstream: string, ideCloudCodeRouting = false) {
+async function fixture(
+  upstream: string,
+  ideCloudCodeRouting = false,
+  lookup?: ConstructorParameters<typeof CloudCodeRouting>[1],
+) {
   const directory = fs.mkdtempSync(path.join(tmpdir(), 'agy-forwarding-'));
   directories.push(directory);
   fs.writeFileSync(path.join(directory, 'custom_models.json'), '{"models":[]}');
@@ -73,7 +77,13 @@ async function fixture(upstream: string, ideCloudCodeRouting = false) {
     './proxy/subagentRouting': subagentRoutingModule,
     './proxy/subagentModels': subagentModels,
     './proxy/nativeSubagentResponse': nativeSubagentResponse,
-    './proxy/cloudCodeRouting': { CloudCodeRouting },
+    './proxy/cloudCodeRouting': {
+      CloudCodeRouting: class extends CloudCodeRouting {
+        constructor() {
+          super(Date.now, lookup);
+        }
+      },
+    },
     './proxy/customRequest': { stopCustomRequests: vi.fn() },
     './modelStore': { readModelConfig: () => [] },
     './schemaValidator': {},
@@ -91,6 +101,7 @@ async function fixture(upstream: string, ideCloudCodeRouting = false) {
     exports: module.exports,
     URL,
     Buffer,
+    AbortController,
     process,
     setTimeout,
     clearTimeout,
@@ -140,6 +151,44 @@ function post(url: string, body: string, chunked: boolean) {
 }
 
 describe('buffered Google metadata forwarding', () => {
+  it('discovers a signed-in caller before forwarding exactly one native generation unchanged', async () => {
+    const bodies: string[] = [];
+    const upstream = await serve((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => (body += chunk));
+      request.on('end', () => {
+        bodies.push(body);
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end('{"candidates":[]}');
+      });
+    });
+    const lookup = vi.fn().mockResolvedValue({ status: 200, body: { paidTier: { usesGcpTos: false } } });
+    const proxy = await fixture(upstream, true, lookup);
+    const body = JSON.stringify({ model: 'gemini-native', project: 'same-project', request: { contents: [] } });
+    const result = await post(proxy.url + '/v1internal:streamGenerateContent', body, true);
+    expect(result.status).toBe(200);
+    expect(bodies).toEqual([body]);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(proxy.forwarded).toHaveLength(1);
+    expect(proxy.forwarded[0].target).toBe(
+      'https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent',
+    );
+    expect(proxy.forwarded[0].headers.authorization).toBe('Bearer forwarding-fixture-token');
+  });
+
+  it('reports a failed route lookup without sending generation to an assumed account endpoint', async () => {
+    const upstream = await serve((_request, response) => response.end('unexpected generation'));
+    const proxy = await fixture(upstream, true, async () => ({
+      status: 429,
+      body: { error: { status: 'RESOURCE_EXHAUSTED' } },
+    }));
+    const result = await post(proxy.url + '/v1internal:streamGenerateContent', '{"model":"native"}', true);
+    expect(result.status).toBe(502);
+    expect(result.body.toString()).toContain('Could not determine the native Cloud Code account route');
+    expect(proxy.forwarded).toEqual([]);
+  });
+
   it('preserves the IDE tier route across metadata and model-catalog requests', async () => {
     let loadCalls = 0;
     const received: { path: string; authorization?: string; host?: string }[] = [];

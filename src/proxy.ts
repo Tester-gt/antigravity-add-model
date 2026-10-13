@@ -258,7 +258,7 @@ function getAdvertisedModelCapabilities(model: CustomModel) {
 
 // ─── Model Loading ────────────────────────────────────────────────────────
 
-function loadCustomModels(): CustomModel[] {
+export function loadCustomModels(): CustomModel[] {
   const filePath = getCustomModelsPath();
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { validateCustomModel } = require('./schemaValidator');
@@ -458,9 +458,43 @@ function proxyToGoogle(
   reqBody: Buffer,
   nativeSubagent?: NativeSubagentRouting,
 ): void {
+  const generation = req.url!.includes('generateContent') || req.url!.includes('streamGenerateContent');
+  const cloudCode = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
+  if (!cloudCodeRouting || !cloudCode || !generation) {
+    forwardToGoogle(req, res, reqBody, nativeSubagent);
+    return;
+  }
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  res.once('close', cancel);
+  void cloudCodeRouting
+    .resolveForGeneration(req.headers, reqBody, controller.signal)
+    .then((origin) => {
+      if (!res.destroyed && !res.writableEnded) forwardToGoogle(req, res, reqBody, nativeSubagent, origin);
+    })
+    .catch(() => {
+      if (res.destroyed || res.writableEnded) return;
+      log.warn('[Proxy] Could not determine the native Cloud Code account route.');
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: 'Could not determine the native Cloud Code account route. Please retry.' },
+        }),
+      );
+    })
+    .finally(() => res.off('close', cancel));
+}
+
+function forwardToGoogle(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  reqBody: Buffer,
+  nativeSubagent?: NativeSubagentRouting,
+  cloudCodeOrigin?: string,
+): void {
   const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
   const targetUrl = isCloudCodeUrl
-    ? cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com'
+    ? cloudCodeOrigin || cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com'
     : 'https://generativelanguage.googleapis.com';
   const parsedUrl = new URL(req.url!, targetUrl);
 

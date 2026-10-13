@@ -60,6 +60,12 @@ and follows the returned tier's endpoint choice; routing state is isolated per
 bearer digest and expires after one hour. A browser authentication-success page
 can appear before IDE account setup finishes, so confirm sign-in in the IDE too.
 
+After a proxy restart, bearer refresh or routing-cache expiry, the proxy queries
+`loadCodeAssist` with the same account identity before forwarding native
+generation. It restores the account's production/daily endpoint choice without
+resending generation or changing account tier. A failed lookup is reported
+explicitly. Genuine provider quota limits still apply.
+
 ## Model manager and credentials
 
 `proxy:start -- --open` opens the browser manager. It has the same model editor,
@@ -104,6 +110,71 @@ assignments remain reserved so a cached IDE selection cannot silently select a
 different provider. Back up this file with `custom_models.json` and the local
 credential key. Restoring only the model list can lose these stable identities.
 
+## Delegate to custom models with MCP
+
+IDE 2.5.5 does not expose the native `invoke_subagent` tool in the tested sessions.
+Its supported [MCP integration](https://antigravity.google/docs/mcp/) provides a
+separate path: a built-in or custom parent can call `delegate_to_model`, send a
+text task to one saved custom model, and receive its answer in the same chat.
+
+Install dependencies/build, configure your custom model in the browser manager,
+and start the proxy with the same data directory used by the MCP server:
+
+```sh
+npm ci --ignore-scripts
+npm run build
+npm run proxy:start -- --data-dir "/path/to/model-data"
+npm run ide:mcp -- apply --data-dir "/path/to/model-data"
+```
+
+The installer adds only the `custom-models` server to
+`~/.gemini/config/mcp_config.json`, preserving other servers and JSONC comments.
+It writes absolute Node/script paths and stores no API key in the MCP config.
+Keep this repository and its dependencies at that path. It refuses an existing
+unmanaged server with the same name. Empty or comment-only starter files are
+supported and restored byte-for-byte when the managed configuration is removed.
+For a different configuration location, pass `--config "/path/mcp_config.json"`
+to apply/status/restore. Check **View raw config** in the IDE's MCP manager for
+the active location: the tested IDE 2.5.5 loaded the global config above, but did
+not discover the workspace `.agents/mcp_config.json` during the live check.
+
+In the IDE, open **… → MCP Servers → Manage MCP Servers** and refresh, or restart
+the IDE. The server provides two tools:
+
+- `list_custom_models`: lists enabled saved names, with a `nextCursor` when more
+  models are available. Pass that cursor to retrieve the next page.
+- `delegate_to_model`: accepts the exact saved `model`, a `prompt`, and optional
+  text `context`. Only the supplied task/context go to that provider. Results
+  include completion/truncation metadata.
+
+For example: “Use the custom-models tools to delegate a summary of this text to
+`models/my-openrouter-model`, then show me its answer.” The selected parent must
+support tool calling and have working provider access; a native parent's quota
+error prevents it from invoking any tool.
+
+Each delegation is an independent **text-only worker**. It does not open an IDE
+child window, inherit chat history, read files, execute commands, or call tools.
+The parent can explicitly supply relevant text as context. Calls use exactly
+the selected model without fallback to another model, allow four concurrent
+workers, and cap task/context at 64 KiB, output at 8,192 tokens and runtime at
+120 seconds. Cancelling the MCP call cancels its provider request. Provider
+usage charges and saved account policies still apply.
+
+The MCP process communicates over stdio and authenticates to the existing owned
+loopback proxy. It never starts a proxy automatically. For a manual MCP config,
+use Node directly with `scripts/model-delegation-mcp.mjs --data-dir ...`; do not
+use `npm run` as the stdio command because npm banners corrupt MCP output.
+
+```sh
+npm run ide:mcp -- status
+npm run ide:mcp -- restore
+```
+
+Restore checks the managed entry and backup integrity, restores the original
+file when unchanged, and preserves unrelated later edits. Backups live in the
+adjacent `mcp_config.json.antigravity-custom-models` directory. A manual change to
+the managed entry is reported as a conflict rather than overwritten.
+
 ## Status and recovery
 
 ```sh
@@ -140,13 +211,15 @@ encrypted model persistence, browser management, local generation and lifecycle.
 | Live Windows IDE 2.5.5 streamed chat | An actual IDE `streamGenerateContent` request reached a local OpenAI-compatible `/v1/chat/completions` endpoint, returned HTTP 200 SSE, and rendered `IDE LIVE ROUTE OK` in the native chat. |
 | Live effort variant routing | Selecting the medium variant in the native picker sent `reasoning_effort: "medium"` to the same upstream model and rendered a second successful streamed response. |
 | Live adapter recovery and launch | Restored and reapplied the isolated profile setting; managed launch started the real Windows executable and its owned proxy. The interactive IDE window is shown rather than hidden by the background-service launch flag. |
+| Live Windows IDE 2.5.5 native parent and MCP discovery | Gemini 3.8 Flash High returned HTTP 200 through the account-selected daily endpoint. The MCP manager loaded both `custom-models` tools from its global config; the native model requested `list_custom_models`, reaching the IDE's user-approval dialog. |
 
 The extracted-function check uses captured message constructors. It verifies the
 vendor selection logic and enum values; it does not substitute for a complete
 protobuf decode or live IDE interaction.
 
-The live check ran on **2026-10-12**, using an isolated Windows profile and a
-local OpenAI-compatible test provider. Linux source inspection and macOS
+The picker and custom-provider live checks ran on **2026-10-12**; native-parent
+and MCP discovery checks ran on **2026-10-13**, using an isolated Windows profile.
+Custom-provider checks use a local OpenAI-compatible test provider. Linux source inspection and macOS
 installer fixtures are separate checks; their desktop UI flows and paid-provider
 generation were not part of this live run.
 

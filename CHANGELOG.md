@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — IDE MCP delegation and native routing recovery
+
+- Restore native Cloud Code routing after proxy restart, bearer refresh or cache expiry by looking up the same account's tier before forwarding generation. Preserve production/daily endpoint selection without retrying generation against another endpoint. Bound discovery time, response size and concurrent cache state; propagate cancellation and explicit discovery failures.
+- Add `list_custom_models` and `delegate_to_model` through an authenticated local MCP server. IDE parents can send isolated text tasks to enabled saved custom models with exact selection, paginated discovery, bounded concurrency and cancellation. This is a text-only worker: it does not add the standalone runtime's native `invoke_subagent` tool, child UI, file access or terminal tools to the IDE.
+- Add `npm run ide:mcp -- apply/status/restore` with comment-preserving edits, integrity-checked backups and conflict-safe recovery, including the IDE's comment-only starter configuration. Document installation, the verified global config location and [live validation limits](docs/ide.md#validation-boundary).
+
 ### Unreleased — Custom model selection for subagents
 
 - Extend custom subagent model selection to built-in Google/Cloud Code parents. Expose custom selectors in their tool schema, preserve wrapped responses, decode compressed JSON/SSE safely, and report routing errors without forwarding invalid tool calls. Add local HTTP coverage for first-child routing, stream framing and native response compatibility.

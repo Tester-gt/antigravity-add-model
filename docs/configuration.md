@@ -160,12 +160,18 @@ an error. Expired markers in parent tool history are removed so the parent can
 continue and spawn fresh children; its original custom selection can only be
 restored while the corresponding routing state remains available. This feature
 depends on Antigravity supplying the child prompt or a stable conversation
-identity, and does not add subagent tools to clients that
-do not expose them. Automated routing coverage uses local HTTP fixtures. A live
-check on Windows IDE 2.5.5 reached the local parent provider, but that test
-session did not expose `invoke_subagent`; native child spawning could therefore
-not be exercised there. This is separate from the native IDE chat validation
-described in the [IDE guide](ide.md#validation-boundary).
+identity, and does not add native subagent tools to clients that do not expose
+them. Automated routing coverage uses local HTTP fixtures. Actual Windows IDE
+2.5.5 requests from both built-in Gemini and custom parents did not declare
+`invoke_subagent`. Google lists native subagents for the separate Antigravity 2.0
+app and CLI in its [subagent documentation](https://antigravity.google/docs/subagents/).
+
+For the IDE, use the supported [MCP delegation setup](ide.md#delegate-to-custom-models-with-mcp).
+The `delegate_to_model` tool sends an independent text task to an exact saved
+custom model and returns its answer to the parent. This worker has no IDE tools,
+filesystem access or inherited conversation; it does not open a native child
+window. Native `invoke_subagent` routing remains available in clients that
+actually expose that tool.
 
 ## Gateway routes
 

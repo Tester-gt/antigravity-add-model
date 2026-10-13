@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CloudCodeRouting } from '../proxy/cloudCodeRouting';
 
 const prod = 'https://cloudcode-pa.googleapis.com';
@@ -6,6 +6,124 @@ const daily = 'https://daily-cloudcode-pa.googleapis.com';
 const headers = (token = 'account-one-token') => ({ authorization: `Bearer ${token}` });
 
 describe('native IDE Cloud Code tier routing', () => {
+  const generation = Buffer.from(JSON.stringify({ project: 'owned-project', request: { contents: [] } }));
+  const signal = () => new AbortController().signal;
+
+  it('discovers a returning signed-in caller before choosing the generation endpoint', async () => {
+    const lookup = vi.fn().mockResolvedValue({ status: 200, body: { paidTier: { usesGcpTos: false } } });
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    expect(await routing.resolveForGeneration(headers(), generation, signal())).toBe(daily);
+    expect(lookup).toHaveBeenCalledWith(headers(), generation, expect.any(AbortSignal));
+    expect(await routing.resolveForGeneration(headers(), generation, signal())).toBe(daily);
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it('rediscovers a refreshed token and expired tier without reusing another account identity', async () => {
+    let now = 100;
+    const lookup = vi.fn().mockResolvedValue({ status: 200, body: { paidTier: { usesGcpTos: false } } });
+    const routing = new CloudCodeRouting(() => now, lookup);
+    routing.observe(headers('old'), 200, { paidTier: { usesGcpTos: true } });
+    expect(await routing.resolveForGeneration(headers('fresh'), generation, signal())).toBe(daily);
+    expect(await routing.resolveForGeneration(headers('old'), generation, signal())).toBe(prod);
+    now += 60 * 60 * 1000;
+    expect(await routing.resolveForGeneration(headers('fresh'), generation, signal())).toBe(daily);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves production for a discovered GCP tier', async () => {
+    const routing = new CloudCodeRouting(Date.now, async () => ({
+      status: 200,
+      body: { paidTier: { usesGcpTos: true } },
+    }));
+    expect(await routing.resolveForGeneration(headers(), generation, signal())).toBe(prod);
+  });
+
+  it('coalesces simultaneous requests without replaying generation', async () => {
+    let complete!: (value: { status: number; body: unknown }) => void;
+    const lookup = vi.fn(() => new Promise<{ status: number; body: unknown }>((resolve) => (complete = resolve)));
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    const one = routing.resolveForGeneration(headers(), generation, signal());
+    const two = routing.resolveForGeneration(headers(), generation, signal());
+    expect(lookup).toHaveBeenCalledTimes(1);
+    complete({ status: 200, body: {} });
+    expect(await Promise.all([one, two])).toEqual([daily, daily]);
+  });
+
+  it('does not guess a generation route after a failed or malformed discovery', async () => {
+    for (const response of [
+      { status: 429, body: {} },
+      { status: 200, body: [] },
+      { status: 200, body: { paidTier: 1 } },
+    ]) {
+      const routing = new CloudCodeRouting(Date.now, async () => response);
+      await expect(routing.resolveForGeneration(headers(), generation, signal())).rejects.toThrow('did not establish');
+      expect(routing.resolve(headers())).toBe(prod);
+    }
+  });
+
+  it('allows a later lookup after transport failure', async () => {
+    const lookup = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ status: 200, body: {} });
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    await expect(routing.resolveForGeneration(headers(), generation, signal())).rejects.toThrow('offline');
+    expect(await routing.resolveForGeneration(headers(), generation, signal())).toBe(daily);
+  });
+
+  it('cancels only a disconnected waiter while another generation still needs the lookup', async () => {
+    let complete!: (value: { status: number; body: unknown }) => void;
+    const lookup = vi.fn(
+      (_headers, _body, _signal) => new Promise<{ status: number; body: unknown }>((resolve) => (complete = resolve)),
+    );
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    const disconnected = new AbortController();
+    const one = routing.resolveForGeneration(headers(), generation, disconnected.signal);
+    const two = routing.resolveForGeneration(headers(), generation, signal());
+    disconnected.abort();
+    await expect(one).rejects.toThrow('cancelled');
+    expect(lookup.mock.calls[0][2].aborted).toBe(false);
+    complete({ status: 200, body: {} });
+    expect(await two).toBe(daily);
+  });
+
+  it('aborts discovery when every waiting generation disconnects and prevents late cache writes', async () => {
+    let complete!: (value: { status: number; body: unknown }) => void;
+    const lookup = vi.fn(
+      (_headers, _body, _signal) => new Promise<{ status: number; body: unknown }>((resolve) => (complete = resolve)),
+    );
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    const disconnected = new AbortController();
+    const pending = routing.resolveForGeneration(headers(), generation, disconnected.signal);
+    disconnected.abort();
+    await expect(pending).rejects.toThrow('cancelled');
+    expect(lookup.mock.calls[0][2].aborted).toBe(true);
+    complete({ status: 200, body: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(routing.resolve(headers())).toBe(prod);
+  });
+
+  it('clears and aborts pending lookups during proxy shutdown', async () => {
+    const lookup = vi.fn(
+      (_headers, _body, signal: AbortSignal) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+        }),
+    );
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    const pending = routing.resolveForGeneration(headers(), generation, signal());
+    routing.clear();
+    await expect(pending).rejects.toThrow('cancelled');
+    expect(lookup.mock.calls[0][2].aborted).toBe(true);
+  });
+
+  it('never discovers missing authorization or a request already cancelled', async () => {
+    const lookup = vi.fn();
+    const routing = new CloudCodeRouting(Date.now, lookup);
+    expect(await routing.resolveForGeneration({}, generation, signal())).toBe(prod);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(routing.resolveForGeneration(headers(), generation, controller.signal)).rejects.toThrow('cancelled');
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
   it('starts unknown callers at the production onboarding endpoint', () => {
     const routing = new CloudCodeRouting();
     expect(routing.resolve(headers())).toBe(prod);

@@ -129,7 +129,7 @@ describe('owned Node proxy and management HTTP', () => {
     }
   });
   it('requires the management token for every action and health/stop operation', async () => {
-    for (const route of ['/_addon/health', '/_addon/rpc', '/_addon/stop']) {
+    for (const route of ['/_addon/health', '/_addon/rpc', '/_addon/stop', '/_addon/delegation/models', '/_addon/delegation/run']) {
       const response = await request(options.port, route, { method: route.endsWith('health') ? 'GET' : 'POST', headers: { Authorization: 'Bearer invalid', 'Content-Type': 'application/json' }, body: route.endsWith('health') ? undefined : '{}' });
       expect(response.status).toBe(401);
       expect(response.text).not.toContain(token);
@@ -168,6 +168,20 @@ describe('owned Node proxy and management HTTP', () => {
     const exported = await rpc('storage:export-custom-models');
     expect(exported.models[0]).not.toHaveProperty('apiKey');
     expect(JSON.stringify(exported)).not.toContain(apiKey);
+  });
+  it('delegates through the authenticated service using its decrypted saved model', async () => {
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const listed = await request(options.port, '/_addon/delegation/models', { headers });
+    expect(listed.status).toBe(200);
+    expect(JSON.parse(listed.text)).toMatchObject({ mode: 'text-only', models: [{ name: 'models/local-fixture' }] });
+    expect(listed.text).not.toContain(apiKey);
+    expect(listed.text).not.toContain('apiUrl');
+    const result = await request(options.port, '/_addon/delegation/run', { method: 'POST', headers, body: JSON.stringify({ model: 'models/local-fixture', prompt: 'Summarize this independent task' }) });
+    expect(result.status).toBe(200);
+    expect(result.text).toContain('Hello from the real local fixture');
+    expect(result.text).not.toContain(apiKey);
+    expect(upstreamCalls.at(-1)).toMatchObject({ authorization: `Bearer ${apiKey}`, path: '/v1/chat/completions', body: { model: 'local-fixture', stream: false } });
+    expect(upstreamCalls.at(-1)!.body).not.toHaveProperty('tools');
   });
   it('routes a native generateContent request to the configured provider with its decrypted key', async () => {
     const response = await request(options.port, '/v1beta/models/local-fixture:generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Hello native IDE request' }] }] }) });
