@@ -118,6 +118,8 @@ rough token estimate and removes whole oldest turns while preserving
 supported tool exchanges. The proxy refuses a latest turn that still cannot fit.
 Retries and fallback stop after output starts; they do not duplicate an already
 streamed answer. Renaming/deleting a model updates its saved fallback references.
+For parallel workloads, see [fallback chains for rate-limited providers](providers.md#fallback-chains-for-rate-limited-providers)
+for worked examples, retry timing and the separate MCP delegation behavior.
 
 Old DeepSeek, Kimi, Fireworks, LM Studio, and llama.cpp entries without
 `apiFormat` retain their historical Anthropic format. Select the intended format

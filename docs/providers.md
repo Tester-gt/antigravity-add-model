@@ -106,6 +106,98 @@ supports tools. Automated coverage uses local HTTP fixtures, including streaming
 function calls; an authenticated live Cloudflare session is not part of those
 tests.
 
+## Fallback chains for rate-limited providers
+
+Parallel agents (for example, `/team` where your Antigravity version supports it)
+and simultaneous sessions can exhaust one provider model's request limit.
+For normal custom-model requests through the desktop/IDE proxy, `fallbackModels`
+lets a failed request try other saved models in order. This is reactive failover;
+it does not distribute healthy requests across models or combine their quotas.
+The optional gateway has its own routing configuration.
+
+### Workers AI limits
+
+As checked on **2026-10-13**, Cloudflare documents these limits:
+
+| Text-generation model / billing | Requests per minute |
+| --- | --- |
+| Model requiring the Workers Paid plan, standard Workers AI billing | 20 per account, per model |
+| Same paid-model category, prepaid AI Gateway credits with the gateway's Workers AI billing set to **Unified billing** | 50 per account, per model |
+| Other text-generation models | 300 default; do not assume a separate 300-RPM bucket for every model |
+
+Adding credits alone does not enable the higher limit. Check each model's page
+for its plan requirement; beta models can have lower limits. See the current
+[Workers AI limits](https://developers.cloudflare.com/workers-ai/platform/limits/)
+before sizing a workload.
+
+Different paid models can have separate provider limits, but all your sessions
+using the same account and upstream model share its limit. Saving that same model
+under another local name does not create more quota. Three 20-RPM models therefore
+do **not** guarantee 60 successful requests per minute through the proxy: retries,
+latency, shared usage, circuit breakers and the total time budget affect progress.
+
+### Example: two primaries with a shared backup
+
+1. Configure three enabled models using the [Workers AI setup](#cloudflare-workers-ai)
+   above. For agent workloads, **every model and serving endpoint in the chain
+   must support function/tool calling** and the request's other required
+   capabilities, such as image input and context size.
+2. Find each model's saved internal `name` in **Configuration name (unique)**
+   in the model editor. In this example they are `models/workers-primary`,
+   `models/workers-secondary` and `models/workers-light`. These are illustrative local names, not provider IDs
+   or display labels; substitute your actual saved names.
+3. Under **Advanced settings → Fallback model configuration names (comma separated)**,
+   enter each primary's fallback names in the order below. Save the models.
+
+| Model selected for a request | Fallback names in order |
+| --- | --- |
+| `models/workers-primary` | `models/workers-secondary, models/workers-light` |
+| `models/workers-secondary` | `models/workers-primary, models/workers-light` |
+| `models/workers-light` | Leave empty |
+
+The equivalent fields on the first model are shown below. This is a **partial
+configuration example, not a complete import**: keep that model's existing
+endpoint, credentials, provider ID and other fields. Only the fallback/retry
+fields need changing; `name` identifies the existing entry.
+
+```json
+{
+  "name": "models/workers-primary",
+  "fallbackModels": ["models/workers-secondary", "models/workers-light"],
+  "maxRetries": 1,
+  "retryBudgetMs": 120000
+}
+```
+
+With these settings, a retryable failure such as HTTP 429 can cause one retry on
+the first model before trying the secondary, then the light model if needed.
+The example's `maxRetries: 1` reduces time spent retrying a busy primary; set it
+through **Advanced settings → Maximum retries (0–5)** and tune each model for
+your workload. `retryBudgetMs` is a JSON-only setting. The default `maxRetries: 3`
+permits the initial attempt **plus three retries**. Each fallback uses its own retry
+setting, while the original primary's `retryBudgetMs` covers the entire chain.
+Backoff (including `Retry-After`) consumes that budget, so it can expire before
+all alternatives are reached. An open circuit breaker can skip a model.
+
+Only the original primary's list is followed. The first row produces primary →
+secondary → light; it never follows the secondary's list back to primary. A
+list containing only secondary would **not** discover light through secondary's
+list. Missing, disabled, duplicate and self references are skipped. HTTP 400/422
+request/schema errors do not trigger fallback, and retries/fallback stop once
+model output begins. See [configuration fields](configuration.md#fields-and-advanced-settings)
+for the supported ranges and defaults.
+
+Where your runtime lets you choose a model for each agent, selecting a suitable
+lighter model before starting the team can proactively reduce pressure on the
+primary. Fallback only reacts after failure; it does not make a model faster or
+increase its provider quota. This example documents existing proxy behavior,
+not a live Workers AI throughput benchmark.
+
+The IDE's separate [MCP `delegate_to_model` worker](ide.md#delegate-to-custom-models-with-mcp)
+always uses the exact requested model with retries and fallback disabled. Its
+four-worker concurrency limit is separate from provider rate limits; the chains
+above do not apply to MCP delegation.
+
 ## Discovery and compatibility notes
 
 | Provider | Discovery behavior and account requirements |

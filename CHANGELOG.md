@@ -2,6 +2,11 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Fallback configuration guide
+
+- Address [issue #16](https://github.com/vahapogut/antigravity-add-model/issues/16) with [fallback-chain examples](docs/providers.md#fallback-chains-for-rate-limited-providers) for parallel agent workloads, dated Workers AI limits and the Unified billing requirement for the higher paid-model limit.
+- Explain saved-name references, one-level chains, retry budgets, tool compatibility and the MCP delegation exception. Clarify that ordered failover does not guarantee combined throughput; no runtime behavior changed.
+
 ### Unreleased — IDE MCP delegation and native routing recovery
 
 - Restore native Cloud Code routing after proxy restart, bearer refresh or cache expiry by looking up the same account's tier before forwarding generation. Preserve production/daily endpoint selection without retrying generation against another endpoint. Bound discovery time, response size and concurrent cache state; propagate cancellation and explicit discovery failures.
