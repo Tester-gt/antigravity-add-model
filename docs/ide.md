@@ -212,6 +212,7 @@ encrypted model persistence, browser management, local generation and lifecycle.
 | Live effort variant routing | Selecting the medium variant in the native picker sent `reasoning_effort: "medium"` to the same upstream model and rendered a second successful streamed response. |
 | Live adapter recovery and launch | Restored and reapplied the isolated profile setting; managed launch started the real Windows executable and its owned proxy. The interactive IDE window is shown rather than hidden by the background-service launch flag. |
 | Live Windows IDE 2.5.5 native parent → custom-model MCP delegation | Completed with the real Google Gemini 3.8 Flash High parent. After the user's one-time approval of each tool, it called `list_custom_models` and `delegate_to_model` with `models/ide-native-child`. The local deterministic OpenAI-compatible provider received `/v1/chat/completions` with the exact child model and no tools; its unique verification marker appeared in the IDE's final parent reply. Both delegation and final native generation returned HTTP 200. This verifies a text-only MCP worker, not native child-agent UI. |
+| Live native parent → real OpenRouter model | Gemini 3.8 Flash High delegated a short arithmetic task to `nvidia/nemotron-3.5-lightning:free` through the MCP tools. One actual HTTPS request reached `openrouter.ai/api/v1/chat/completions` and returned HTTP 200 with the requested model and `stop`. The provider's answer, MCP result and final Gemini reply had identical SHA-256 text hashes; the IDE displayed the verification marker and `137x29=3973`. The selected model's input/output prices were zero in OpenRouter's live catalog at test time. |
 
 The extracted-function check uses captured message constructors. It verifies the
 vendor selection logic and enum values; it does not substitute for a complete
@@ -219,9 +220,12 @@ protobuf decode or live IDE interaction.
 
 The picker and custom-provider live checks ran on **2026-10-12**; native-parent
 and MCP delegation checks ran on **2026-10-13**, using an isolated Windows profile.
-Custom-provider checks use a local OpenAI-compatible test provider. Linux source
-inspection and macOS installer fixtures are separate checks; their desktop UI
-flows and paid custom-provider generation were not part of this live run.
+Custom-provider checks include a local OpenAI-compatible fixture and the real
+OpenRouter free endpoint above. The remote run used the user's API key entered
+in the local model manager and one short task; no credentials are committed or
+written to verification logs. Linux source inspection and macOS installer
+fixtures are separate checks; their desktop UI flows and paid custom-provider
+generation were not part of these live runs.
 
 This release obtains its picker through `fetchAvailableModels` and native
 unified-state updates; it does not require a `GetUserStatus` RPC injection.
