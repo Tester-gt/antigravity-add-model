@@ -1,5 +1,6 @@
 import * as subagentRoutingModule from '../proxy/subagentRouting';
 import * as subagentModels from '../proxy/subagentModels';
+import * as nativeSubagentResponse from '../proxy/nativeSubagentResponse';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -86,6 +87,7 @@ function fixture(fixed = true) {
     './proxy/modelCatalog': {},
     './proxy/subagentRouting': subagentRoutingModule,
     './proxy/subagentModels': subagentModels,
+    './proxy/nativeSubagentResponse': nativeSubagentResponse,
     './proxy/cloudCodeRouting': {},
     './modelIdentity': {},
     './proxy/customRequest': { stopCustomRequests: vi.fn(), getProxyMetrics: () => ({ requests: 0 }) },
@@ -215,6 +217,51 @@ describe('proxy lifecycle across language-server restarts', () => {
     await stopped;
     expect(proxy.servers[0].close).toHaveBeenCalledOnce();
     expect(proxy.getProxyPort()).toBe(0);
+  });
+
+  it('discards routes created by a final native response while shutdown drains requests', async () => {
+    const proxy = fixture();
+    const started = proxy.startProxy();
+    proxy.servers[0].ready();
+    await started;
+    let finishClose = () => {};
+    proxy.servers[0].close.mockImplementation((callback) => {
+      finishClose = () => {
+        proxy.servers[0].listening = false;
+        callback();
+      };
+      return proxy.servers[0];
+    });
+    const stopped = proxy.stopProxy();
+    const bridge = subagentRoutingModule.subagentRouting;
+    const resolve = (selector: string) => (selector === 'models/child' ? selector : undefined);
+    const parent = bridge.prepareRequest({ conversationId: 'shutdown-parent', contents: [] }, resolve);
+    const candidate = bridge.rewriteCandidate(
+      {
+        content: {
+          parts: [
+            {
+              functionCall: {
+                name: 'invoke_subagent',
+                args: { Subagents: [{ Model: 'models/child', Prompt: 'Work' }] },
+              },
+            },
+          ],
+        },
+      },
+      parent.context,
+      resolve,
+    );
+    const prompt = candidate.content.parts[0].functionCall.args.Subagents[0].Prompt;
+    const child = { conversationId: 'shutdown-child', contents: [{ role: 'user', parts: [{ text: prompt }] }] };
+    expect(bridge.prepareRequest(child, resolve).modelName).toBe('models/child');
+
+    finishClose();
+    await stopped;
+    expect(() => bridge.prepareRequest(child, resolve)).toThrow('expired or is unknown');
+    expect(
+      bridge.prepareRequest({ conversationId: 'shutdown-child', contents: [] }, resolve).modelName,
+    ).toBeUndefined();
   });
 
   it('queues a start requested while the old listener is shutting down', async () => {

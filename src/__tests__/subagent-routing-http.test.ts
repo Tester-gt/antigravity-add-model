@@ -16,6 +16,7 @@ import * as customRequest from '../proxy/customRequest';
 import * as shared from '../proxy/shared';
 import * as subagentRouting from '../proxy/subagentRouting';
 import * as subagentModels from '../proxy/subagentModels';
+import * as nativeSubagentResponse from '../proxy/nativeSubagentResponse';
 import { validateCustomModel } from '../schemaValidator';
 
 vi.mock('electron-log', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
@@ -90,6 +91,7 @@ async function fixture(models: CustomModel[], fallback: string) {
     './proxy/cloudCodeRouting': { CloudCodeRouting },
     './proxy/subagentRouting': subagentRouting,
     './proxy/subagentModels': subagentModels,
+    './proxy/nativeSubagentResponse': nativeSubagentResponse,
     './proxy/customRequest': customRequest,
     './modelStore': { readModelConfig: () => models.map((model) => ({ ...model })) },
     './schemaValidator': { validateCustomModel },
@@ -314,16 +316,108 @@ async function request(
 
 async function toolCalls(response: Response, stream: boolean) {
   expect(response.status).toBe(200);
-  const payloads: Payload[] = stream
-    ? (await response.text())
-        .split('\n')
-        .filter((line) => line.startsWith('data: '))
-        .map((line) => JSON.parse(line.slice(6)))
-    : [await response.json()];
+  const payloads: Payload[] = stream ? ssePayloads(await response.text()) : [await response.json()];
   return payloads
     .flatMap((payload) => (payload.response || payload).candidates || [])
     .flatMap((candidate) => candidate.content?.parts || [])
     .flatMap((part) => (part.functionCall ? [part.functionCall] : []));
+}
+
+function ssePayloads(wire: string): Payload[] {
+  return wire
+    .replace(/\r\n/g, '\n')
+    .split('\n\n')
+    .map((frame) =>
+      frame
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).replace(/^ /, ''))
+        .join('\n'),
+    )
+    .filter((data) => data && data !== '[DONE]')
+    .map((data) => JSON.parse(data));
+}
+
+type NativeTransport = 'cloud-code' | 'standard';
+type NativeEncoding = 'identity' | 'gzip' | 'deflate' | 'br';
+
+function nativePayload(transport: NativeTransport, invocations?: Invocation[]) {
+  const response = {
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: invocations
+            ? [{ functionCall: { name: 'invoke_subagent', args: { Subagents: invocations } } }]
+            : [{ text: 'NATIVE OK: İstanbul 🚀' }],
+        },
+        finishReason: 'STOP',
+      },
+    ],
+    usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 9 },
+  };
+  return transport === 'cloud-code' ? { response, traceId: 'native-trace', metadata: { unchanged: true } } : response;
+}
+
+function compressed(wire: string, encoding: NativeEncoding): Buffer {
+  const bytes = Buffer.from(wire);
+  if (encoding === 'gzip') return zlib.gzipSync(bytes);
+  if (encoding === 'deflate') return zlib.deflateSync(bytes);
+  if (encoding === 'br') return zlib.brotliCompressSync(bytes);
+  return bytes;
+}
+
+async function nativeRequest(
+  proxy: string,
+  transport: NativeTransport,
+  stream: boolean,
+  identity: string,
+  text = 'Start native parent',
+) {
+  const endpoint = transport === 'cloud-code' ? '/v1internal' : '/v1beta/models/gemini-native-pro';
+  const body = { labels: { cascade_id: identity }, contents: [{ role: 'user', parts: [{ text }] }], tools: [schema] };
+  return fetch(`${proxy}${endpoint}:${stream ? 'streamGenerateContent?alt=sse' : 'generateContent'}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(transport === 'cloud-code' ? { model: 'gemini-native-pro', request: body } : body),
+  });
+}
+
+async function nativeFixture(options: {
+  transport: NativeTransport;
+  stream: boolean;
+  encoding?: NativeEncoding;
+  invocations?: Invocation[];
+  wire?: string;
+  status?: number;
+  contentType?: string;
+  fragmented?: boolean;
+}) {
+  const requests: Record<string, unknown>[] = [];
+  const payload = nativePayload(options.transport, options.invocations);
+  const wire =
+    options.wire ?? (options.stream ? `data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n` : JSON.stringify(payload));
+  const bytes = compressed(wire, options.encoding || 'identity');
+  const url = await serve(async (req, res) => {
+    requests.push(await readBody(req));
+    res.statusCode = options.status || 200;
+    res.setHeader('Content-Type', options.contentType || (options.stream ? 'text/event-stream' : 'application/json'));
+    if (options.encoding && options.encoding !== 'identity') res.setHeader('Content-Encoding', options.encoding);
+    res.setHeader('Content-Length', bytes.length);
+    res.setHeader('X-Upstream-Trace', 'native-fixture');
+    if (!options.fragmented) {
+      res.end(bytes);
+      return;
+    }
+    // Write individual bytes across event-loop turns, including multibyte UTF-8,
+    // CRLF delimiters, and JSON tokens. No chunk can be assumed to be a line.
+    for (let index = 0; index < bytes.length && !res.destroyed; index++) {
+      res.write(bytes.subarray(index, index + 1));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    res.end();
+  });
+  return { url, requests, payload, wire };
 }
 
 const crossProviderCases = (['google', 'openai', 'anthropic'] as const).flatMap((parentProvider) =>
@@ -664,14 +758,14 @@ describe('subagent bridge through native-shaped HTTP requests', () => {
       expect(nativeBody.contents[1].parts[0].functionCall?.args).toEqual({
         Subagents: [{ Model: child.name, Prompt: 'Preserve the original task' }],
       });
-      expect(nativeBody.tools).toEqual([schema]);
       if (transport === 'cloud-code') {
         expect(forwarded.conversationId).toBe('parent');
         expect(forwarded.sessionId).toBe('outer-session');
         expect(nativeBody).not.toHaveProperty('conversationId');
         expect(nativeBody).not.toHaveProperty('sessionId');
       }
-      expect(JSON.stringify(nativeBody.tools)).toContain('"enum":["inherit","flash","pro"]');
+      expect(JSON.stringify(nativeBody.tools)).not.toContain('"enum":["inherit","flash","pro"]');
+      expect(JSON.stringify(nativeBody.tools)).toContain('exact saved name');
     },
   );
 
@@ -687,4 +781,264 @@ describe('subagent bridge through native-shaped HTTP requests', () => {
     expect(response.status).toBe(400);
     expect(upstream.requests).toHaveLength(0);
   });
+});
+
+const nativeCases = (['identity', 'gzip', 'deflate', 'br'] as const)
+  .flatMap((encoding) =>
+    [false, true].map((stream) => ({ transport: 'cloud-code' as NativeTransport, encoding, stream })),
+  )
+  .concat(
+    [false, true].map((stream) => ({
+      transport: 'standard' as NativeTransport,
+      encoding: 'gzip' as NativeEncoding,
+      stream,
+    })),
+  );
+
+describe('built-in parent to custom subagent through native Google HTTP forwarding', () => {
+  it('relaxes both native schema forms while preserving unrelated enum constraints', async () => {
+    const builtin = await nativeFixture({ transport: 'cloud-code', stream: false });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+    const parameters = structuredClone(schema.functionDeclarations[0].parametersJsonSchema);
+    const tools = [
+      {
+        functionDeclarations: [
+          { name: 'invoke_subagent', parameters, parametersJsonSchema: parameters },
+          {
+            name: 'other_tool',
+            parameters: { type: 'object', properties: { Model: { type: 'string', enum: ['allowed'] } } },
+          },
+        ],
+      },
+    ];
+    const response = await fetch(`${proxy}/v1internal:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gemini-native-pro',
+        request: {
+          conversationId: 'schema-parent',
+          contents: [{ role: 'user', parts: [{ text: 'Schema test' }] }],
+          tools,
+        },
+      }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    const forwarded = builtin.requests[0].request as { tools: typeof tools };
+    const invocation = forwarded.tools[0].functionDeclarations[0];
+    for (const field of ['parameters', 'parametersJsonSchema'] as const) {
+      const modified = invocation[field] as typeof parameters;
+      expect(modified.properties.Subagents.items.properties.Model).not.toHaveProperty('enum');
+      expect(modified.properties.Subagents.items.properties.Model).toHaveProperty(
+        'description',
+        expect.stringContaining('exact saved name'),
+      );
+      expect(modified.properties.Subagents.items.required).toEqual(['Model', 'Prompt']);
+    }
+    expect(forwarded.tools[0].functionDeclarations[1]).toEqual(tools[0].functionDeclarations[1]);
+    expect(parameters.properties.Subagents.items.properties.Model.enum).toEqual(['inherit', 'flash', 'pro']);
+  });
+
+  it.each(nativeCases)(
+    'routes first child over $transport, stream=$stream, encoding=$encoding',
+    async ({ transport, stream, encoding }) => {
+      const builtin = await nativeFixture({
+        transport,
+        stream,
+        encoding,
+        invocations: [{ Model: 'models/child', Prompt: 'Native parent child task: İstanbul 🚀', TypeName: 'research' }],
+      });
+      const upstream = await providerFixture(() => undefined);
+      const child = model(upstream.url, stream ? 'anthropic' : 'openai', 'child');
+      const proxy = await fixture([child], builtin.url);
+      const response = await nativeRequest(proxy, transport, stream, 'native-parent');
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-upstream-trace')).toBe('native-fixture');
+      const wire = await response.text();
+      const payloads = stream ? ssePayloads(wire) : [JSON.parse(wire) as Payload];
+      expect(JSON.stringify(payloads)).toContain('"promptTokenCount":12');
+      if (transport === 'cloud-code') {
+        expect(JSON.stringify(payloads)).toContain('"traceId":"native-trace"');
+        expect(JSON.stringify(payloads)).toContain('"metadata":{"unchanged":true}');
+      }
+      const [call] = payloads
+        .flatMap((payload) => (payload.response || payload).candidates || [])
+        .flatMap((candidate) => candidate.content?.parts || [])
+        .flatMap((part) => (part.functionCall ? [part.functionCall] : []));
+      expect(call?.args.Subagents[0]).toMatchObject({ Model: 'inherit', TypeName: 'research' });
+      expect(call.args.Subagents[0].Prompt).toContain('Native parent child task: İstanbul 🚀');
+      expect(call.args.Subagents[0].Prompt).toContain('[antigravity-subagent-route:');
+      const forwarded = JSON.stringify(builtin.requests[0]);
+      expect(forwarded).toContain('exact saved name');
+      expect(forwarded).not.toContain('"enum":["inherit","flash","pro"]');
+
+      // Child starts before the native parent receives any invoke_subagent result.
+      const result = await nativeRequest(proxy, transport, stream, 'native-child', call.args.Subagents[0].Prompt);
+      expect(result.status).toBe(200);
+      expect(await result.text()).toContain('CHILD OK');
+      expect(builtin.requests).toHaveLength(1);
+      expect(upstream.requests).toHaveLength(1);
+      expect(upstream.requests[0].model).toBe('child');
+      expect(upstream.requests[0].wire).toContain('Native parent child task: İstanbul 🚀');
+      expect(upstream.requests[0].wire).not.toContain('antigravity-subagent-route:');
+    },
+  );
+
+  it('rewrites wrapped SSE split inside UTF-8, CRLF delimiters and multiline data fields', async () => {
+    const payload = nativePayload('cloud-code', [{ Model: 'models/child', Prompt: 'Görev 🚀 中文' }]);
+    const json = JSON.stringify(payload, null, 2);
+    const wire = `: keep alive\r\nevent: message\r\nid: event-7\r\n${json
+      .split('\n')
+      .map((line) => `data: ${line}\r\n`)
+      .join('')}\r\ndata: [DONE]\r\n\r\n`;
+    const builtin = await nativeFixture({ transport: 'cloud-code', stream: true, wire, fragmented: true });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+    const response = await nativeRequest(proxy, 'cloud-code', true, 'fragment-parent');
+    expect(response.status).toBe(200);
+    const forwarded = await response.text();
+    expect(forwarded).toContain('event: message');
+    expect(forwarded).toContain('id: event-7');
+    expect(forwarded).toContain('[DONE]');
+    expect(forwarded).not.toContain('�');
+    const call = ssePayloads(forwarded)[0].response!.candidates![0].content!.parts![0].functionCall!;
+    expect(call.args.Subagents[0].Model).toBe('inherit');
+    const childResponse = await nativeRequest(
+      proxy,
+      'cloud-code',
+      false,
+      'fragment-child',
+      call.args.Subagents[0].Prompt,
+    );
+    expect(childResponse.status).toBe(200);
+    await childResponse.text();
+    expect(upstream.requests[0].wire).toContain('Görev 🚀 中文');
+  });
+
+  it.each([false, true])('preserves explicit native tiers and inherit, stream=%s', async (stream) => {
+    const invocations: Invocation[] = ['flash_lite', 'flash', 'pro', 'inherit'].map((Model) => ({
+      Model,
+      Prompt: `${Model} task`,
+    }));
+    invocations.push({ Prompt: 'omitted model task' });
+    const builtin = await nativeFixture({ transport: 'cloud-code', stream, invocations });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+    const [call] = await toolCalls(await nativeRequest(proxy, 'cloud-code', stream, 'tier-parent'), stream);
+    expect(call.args.Subagents).toEqual(invocations);
+    expect(JSON.stringify(call)).not.toContain('antigravity-subagent-route:');
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it.each([false, true].flatMap((stream) => ['unknown', 'disabled'].map((kind) => ({ stream, kind }))))(
+    'fails explicitly for $kind custom selection before output, stream=$stream',
+    async ({ stream, kind }) => {
+      const builtin = await nativeFixture({
+        transport: 'cloud-code',
+        stream,
+        invocations: [{ Model: `models/${kind}`, Prompt: 'Do not execute an invalid selection' }],
+      });
+      const upstream = await providerFixture(() => undefined);
+      const disabled = { ...model(upstream.url, 'openai', 'disabled'), enabled: false };
+      const proxy = await fixture([model(upstream.url, 'openai', 'child'), disabled], builtin.url);
+      const response = await nativeRequest(proxy, 'cloud-code', stream, 'invalid-parent');
+      expect(response.status).toBe(400);
+      const wire = await response.text();
+      expect(wire).toContain('error');
+      expect(wire).not.toContain('"functionCall"');
+      expect(wire).not.toContain('antigravity-subagent-route:');
+      expect(upstream.requests).toHaveLength(0);
+    },
+  );
+
+  it('reports a bad model in a later SSE event without forwarding its executable tool call', async () => {
+    const first = nativePayload('cloud-code');
+    const invalid = nativePayload('cloud-code', [{ Model: 'models/missing', Prompt: 'Must not run' }]);
+    const wire = `data: ${JSON.stringify(first)}\n\ndata: ${JSON.stringify(invalid)}\n\ndata: [DONE]\n\n`;
+    const builtin = await nativeFixture({ transport: 'cloud-code', stream: true, wire });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+    const response = await nativeRequest(proxy, 'cloud-code', true, 'late-error-parent');
+    expect(response.status).toBe(200);
+    const forwarded = await response.text();
+    expect(forwarded).toContain('NATIVE OK');
+    expect(forwarded).toContain('error');
+    expect(forwarded).not.toContain('"functionCall"');
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('rewrites a compressed JSON array returned from the streaming endpoint', async () => {
+    const payload = nativePayload('cloud-code', [{ Model: 'models/child', Prompt: 'Array child task' }]);
+    const builtin = await nativeFixture({
+      transport: 'cloud-code',
+      stream: true,
+      encoding: 'gzip',
+      contentType: 'application/json',
+      wire: JSON.stringify([nativePayload('cloud-code'), payload]),
+    });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'google', 'child')], builtin.url);
+    const response = await nativeRequest(proxy, 'cloud-code', true, 'array-parent');
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as Payload[];
+    expect(data).toHaveLength(2);
+    const invocation = data[1].response!.candidates![0].content!.parts![0].functionCall!.args.Subagents[0];
+    expect(invocation.Model).toBe('inherit');
+    const childResponse = await nativeRequest(proxy, 'cloud-code', false, 'array-child', invocation.Prompt);
+    expect(childResponse.status).toBe(200);
+    await childResponse.text();
+    expect(upstream.requests[0].model).toBe('child');
+  });
+
+  it.each([false, true])('keeps compressed ordinary native responses readable, stream=%s', async (stream) => {
+    const builtin = await nativeFixture({ transport: 'cloud-code', stream, encoding: 'gzip' });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+    const response = await nativeRequest(proxy, 'cloud-code', stream, 'ordinary-parent');
+    expect(response.status).toBe(200);
+    const wire = await response.text();
+    expect(wire).toContain('NATIVE OK: İstanbul 🚀');
+    expect(wire).not.toContain('�');
+    expect(wire).not.toContain('antigravity-subagent-route:');
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('preserves upstream HTTP error status and compressed non-JSON error response', async () => {
+    const builtin = await nativeFixture({
+      transport: 'cloud-code',
+      stream: true,
+      encoding: 'gzip',
+      status: 429,
+      contentType: 'text/plain',
+      wire: 'Native quota exceeded: İstanbul 🚀',
+    });
+    const upstream = await providerFixture(() => undefined);
+    const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+    const response = await nativeRequest(proxy, 'cloud-code', true, 'quota-parent');
+    expect(response.status).toBe(429);
+    expect(response.headers.get('content-type')).toContain('text/plain');
+    expect(response.headers.get('content-encoding')).toBe('gzip');
+    expect(response.headers.get('content-length')).toBe(String(compressed(builtin.wire, 'gzip').length));
+    expect(await response.text()).toBe('Native quota exceeded: İstanbul 🚀');
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    'preserves unrecognized malformed native data without introducing a routing failure, stream=%s',
+    async (stream) => {
+      const builtin = await nativeFixture({
+        transport: 'cloud-code',
+        stream,
+        wire: stream ? 'data: {"response": BROKEN}\n\n' : '{"response": BROKEN}',
+      });
+      const upstream = await providerFixture(() => undefined);
+      const proxy = await fixture([model(upstream.url, 'openai', 'child')], builtin.url);
+      const response = await nativeRequest(proxy, 'cloud-code', stream, 'malformed-parent');
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(builtin.wire);
+      expect(upstream.requests).toHaveLength(0);
+    },
+  );
 });

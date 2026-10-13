@@ -114,6 +114,7 @@ import { readModelConfig, writeJsonAtomic } from './modelStore';
 import { getRequiredProxyPort, listenProxy } from './proxy/listen';
 import { subagentRouting, SubagentRoutingError } from './proxy/subagentRouting';
 import { resolveConfiguredSubagentModel } from './proxy/subagentModels';
+import { forwardNativeGeneration, NativeSubagentRouting } from './proxy/nativeSubagentResponse';
 
 // Dynamic imports (stays require for Electron-specific modules)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -438,7 +439,25 @@ function forwardingHeaders(source: http.IncomingHttpHeaders): http.OutgoingHttpH
   return headers;
 }
 
-function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqBody: Buffer): void {
+function hasSubagentTool(body: GeminiRequestBody): boolean {
+  return (
+    body.tools?.some((group) => {
+      const declarations = (group as { functionDeclarations?: { name?: string }[] })?.functionDeclarations;
+      return Array.isArray(declarations) && declarations.some((tool) => tool?.name === 'invoke_subagent');
+    }) ||
+    body.contents?.some((content) =>
+      content.parts?.some((part) => (part.functionCall as { name?: string })?.name === 'invoke_subagent'),
+    ) ||
+    false
+  );
+}
+
+function proxyToGoogle(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  reqBody: Buffer,
+  nativeSubagent?: NativeSubagentRouting,
+): void {
   const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
   const targetUrl = isCloudCodeUrl
     ? cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com'
@@ -457,22 +476,33 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
   if (shouldBufferAndModify) {
     delete headers['accept-encoding'];
   }
+  if (nativeSubagent) headers['accept-encoding'] = 'identity';
 
   const options: https.RequestOptions = {
     method: req.method,
     headers: headers as Record<string, string>,
   };
 
+  let nativeResponse: http.IncomingMessage | undefined;
+  const failForwarding = (status: number, message: string) => {
+    if (res.destroyed || res.writableEnded) return;
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message } }));
+  };
   const proxyReq = https.request(parsedUrl, options, (proxyRes) => {
-    // P0-5: Timeout for Google proxy requests (60s)
-    proxyReq.setTimeout(60_000, () => {
-      log.error('[Proxy] Google proxy request timed out after 60s');
-      proxyReq.destroy();
-      if (!res.headersSent) {
-        res.writeHead(504, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'Google API request timed out' } }));
-      }
-    });
+    if (nativeSubagent && isGeneration) {
+      nativeResponse = proxyRes;
+      const streamHint = req.url!.includes('streamGenerateContent') || req.url!.includes('alt=sse');
+      void forwardNativeGeneration(proxyRes, res, nativeSubagent, streamHint).catch((error: unknown) => {
+        log.error('[Proxy] Native generation forwarding failed:', error);
+        failForwarding(502, 'Native generation forwarding failed.');
+      });
+      return;
+    }
 
     if (shouldBufferAndModify) {
       const responseChunks: Buffer[] = [];
@@ -528,8 +558,20 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
 
   proxyReq.on('error', (err) => {
     log.error('[Proxy] Google Forwarding Error:', err);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: { message: 'Proxy forwarding failed: ' + err.message } }));
+    if (nativeResponse) {
+      nativeResponse.destroy(err);
+      return;
+    }
+    failForwarding(502, 'Proxy forwarding failed: ' + err.message);
+  });
+  proxyReq.setTimeout(60_000, () => {
+    log.error('[Proxy] Google proxy request timed out after 60s');
+    if (nativeResponse) nativeResponse.destroy(new Error('Google API request timed out'));
+    else failForwarding(504, 'Google API request timed out');
+    proxyReq.destroy();
+  });
+  res.once('close', () => {
+    if (!res.writableFinished) proxyReq.destroy();
   });
 
   if (reqBody) {
@@ -1194,13 +1236,25 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             });
             return;
           }
-          // Restore a switched parent's history, keeping the native tool schema.
+          // Restore history and expose custom subagent selectors to native parents,
+          // preserving the original placement of Cloud Code envelope metadata.
           const nativeBody = {
             ...((reqJson.request || reqJson) as Record<string, unknown>),
             contents: prepared.body.contents,
+            tools: prepared.body.tools,
           };
           const forwarded = reqJson.request ? { ...reqJson, request: nativeBody } : { ...reqJson, ...nativeBody };
-          proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)));
+          proxyToGoogle(
+            req,
+            res,
+            Buffer.from(JSON.stringify(forwarded)),
+            hasSubagentTool(actualGeminiBody)
+              ? {
+                  context: prepared.context,
+                  resolve: (selector) => resolveConfiguredSubagentModel(customModels, selector)?.name,
+                }
+              : undefined,
+          );
           return;
         }
       } catch (err) {
@@ -1257,7 +1311,17 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           });
           return;
         }
-        proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents })));
+        proxyToGoogle(
+          req,
+          res,
+          Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents, tools: prepared.body.tools })),
+          hasSubagentTool(geminiBody)
+            ? {
+                context: prepared.context,
+                resolve: (selector) => resolveConfiguredSubagentModel(customModels, selector)?.name,
+              }
+            : undefined,
+        );
         return;
       } catch (e) {
         log.error('[Proxy] JSON parse error in request body:', e);
@@ -1327,7 +1391,6 @@ export function stopProxy(): Promise<void> {
     }
     stopCleanupInterval();
     stopCustomRequests();
-    subagentRouting.clear();
     cloudCodeRouting?.clear();
     if (server) {
       const closingServer = server;
@@ -1344,6 +1407,8 @@ export function stopProxy(): Promise<void> {
       });
       log.info('[Proxy] Server stopped');
     }
+    // Final native responses may create routing markers while shutdown drains.
+    subagentRouting.clear();
     server = null;
     proxyPort = 0;
   })().finally(() => {

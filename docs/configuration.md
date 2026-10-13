@@ -125,9 +125,10 @@ explicitly when migrating a configuration.
 
 ## Subagent model selection
 
-When Antigravity exposes the `invoke_subagent` tool, a custom-model conversation
-can choose another enabled configured model through `Subagents[].Model`. Use the
-model's exact saved `name`, such as `models/local-example` from the import above;
+When Antigravity exposes the `invoke_subagent` tool, a conversation using either
+a built-in or custom model can choose an enabled configured model through
+`Subagents[].Model`. Use the model's exact saved `name`, such as
+`models/local-example` from the import above;
 the display label and upstream provider model ID are not interchangeable with
 this name. Configure and enable the target model first, then include its saved
 name when asking the agent to delegate work.
@@ -144,6 +145,13 @@ result, and parallel calls do not share a fallback tool-call ID. Markers are
 removed before forwarding the child's prompt to a provider; replayed parent
 history restores the original prompt and `Model` even after switching between
 Gemini, OpenAI-compatible, and Anthropic-compatible providers.
+
+Built-in Google/Cloud Code parents use the same routing bridge. The proxy exposes
+custom model selection in their tool schema and rewrites their JSON or SSE tool
+responses before Antigravity validates the native model tier. Cloud Code response
+envelopes and compressed responses are handled without dropping their metadata.
+An invalid selection returns an explicit error; if a stream has already started,
+the proxy emits a terminal SSE error instead of forwarding an invalid tool call.
 
 Routing state is held in proxy memory, with a one-hour inactivity limit and up
 to 4,096 entries per routing cache. Start new subagents after restarting the

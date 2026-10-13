@@ -38,6 +38,7 @@ export const REQUIRED_BUILD_FILES = [
   'proxy/customRequest.js',
   'proxy/subagentRouting.js',
   'proxy/subagentModels.js',
+  'proxy/nativeSubagentResponse.js',
   'proxy/requestOptions.js',
   'proxy/circuitBreaker.js',
   'proxy/translators/openai.js',

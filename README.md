@@ -51,7 +51,7 @@ Add external API providers and local models alongside Antigravity's built-in mod
 | **Manage models** | Provider groups, search, edit, duplicate, enable/disable, and model discovery. |
 | **Connect your providers** | OpenAI, Anthropic, Gemini, OpenRouter, [Cloudflare Workers AI](docs/providers.md#cloudflare-workers-ai), and other compatible APIs; local services such as Ollama, LM Studio, and vLLM. |
 | **Tune requests** | Protocol selection, reasoning settings, context/output limits, custom headers, timeouts, retries, fallbacks, and circuit breakers. |
-| **Choose subagent models** | Use an enabled configured model for `invoke_subagent`, with isolated routing for parallel agents and restored history across providers. [Configuration](docs/configuration.md#subagent-model-selection). |
+| **Choose subagent models** | Delegate from built-in or custom models to an enabled configured model with `invoke_subagent`, isolated parallel routing, and restored history across providers. [Configuration](docs/configuration.md#subagent-model-selection). |
 | **Use Google account pools** | Explicit OAuth sign-in with your own client, encrypted storage, quota checks, adaptive account selection and model-specific cooldowns. |
 | **Inspect direct requests** | Diagnostics with recent requests, measured latency/token usage, and an explicit small generation test. |
 | **Connect Antigravity IDE** | Reversible settings adapter, owned proxy launcher and browser model manager; native picker and streamed chat verified on Windows IDE 2.5.5 with a local OpenAI-compatible provider. [Setup](docs/ide.md). |

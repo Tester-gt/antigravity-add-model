@@ -70,6 +70,7 @@ const modelStore_1 = require("./modelStore");
 const listen_1 = require("./proxy/listen");
 const subagentRouting_1 = require("./proxy/subagentRouting");
 const subagentModels_1 = require("./proxy/subagentModels");
+const nativeSubagentResponse_1 = require("./proxy/nativeSubagentResponse");
 // Dynamic imports (stays require for Electron-specific modules)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const cryptoStore = require('./cryptoStore');
@@ -354,7 +355,15 @@ function forwardingHeaders(source) {
     }
     return headers;
 }
-function proxyToGoogle(req, res, reqBody) {
+function hasSubagentTool(body) {
+    return (body.tools?.some((group) => {
+        const declarations = group?.functionDeclarations;
+        return Array.isArray(declarations) && declarations.some((tool) => tool?.name === 'invoke_subagent');
+    }) ||
+        body.contents?.some((content) => content.parts?.some((part) => part.functionCall?.name === 'invoke_subagent')) ||
+        false);
+}
+function proxyToGoogle(req, res, reqBody, nativeSubagent) {
     const isCloudCodeUrl = req.url.includes('v1internal') || req.url.includes('daily-cloudcode');
     const targetUrl = isCloudCodeUrl
         ? cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com'
@@ -370,20 +379,33 @@ function proxyToGoogle(req, res, reqBody) {
     if (shouldBufferAndModify) {
         delete headers['accept-encoding'];
     }
+    if (nativeSubagent)
+        headers['accept-encoding'] = 'identity';
     const options = {
         method: req.method,
         headers: headers,
     };
+    let nativeResponse;
+    const failForwarding = (status, message) => {
+        if (res.destroyed || res.writableEnded)
+            return;
+        if (res.headersSent) {
+            res.destroy();
+            return;
+        }
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message } }));
+    };
     const proxyReq = https.request(parsedUrl, options, (proxyRes) => {
-        // P0-5: Timeout for Google proxy requests (60s)
-        proxyReq.setTimeout(60000, () => {
-            electron_log_1.default.error('[Proxy] Google proxy request timed out after 60s');
-            proxyReq.destroy();
-            if (!res.headersSent) {
-                res.writeHead(504, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: 'Google API request timed out' } }));
-            }
-        });
+        if (nativeSubagent && isGeneration) {
+            nativeResponse = proxyRes;
+            const streamHint = req.url.includes('streamGenerateContent') || req.url.includes('alt=sse');
+            void (0, nativeSubagentResponse_1.forwardNativeGeneration)(proxyRes, res, nativeSubagent, streamHint).catch((error) => {
+                electron_log_1.default.error('[Proxy] Native generation forwarding failed:', error);
+                failForwarding(502, 'Native generation forwarding failed.');
+            });
+            return;
+        }
         if (shouldBufferAndModify) {
             const responseChunks = [];
             proxyRes.on('data', (chunk) => responseChunks.push(chunk));
@@ -433,8 +455,23 @@ function proxyToGoogle(req, res, reqBody) {
     });
     proxyReq.on('error', (err) => {
         electron_log_1.default.error('[Proxy] Google Forwarding Error:', err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'Proxy forwarding failed: ' + err.message } }));
+        if (nativeResponse) {
+            nativeResponse.destroy(err);
+            return;
+        }
+        failForwarding(502, 'Proxy forwarding failed: ' + err.message);
+    });
+    proxyReq.setTimeout(60000, () => {
+        electron_log_1.default.error('[Proxy] Google proxy request timed out after 60s');
+        if (nativeResponse)
+            nativeResponse.destroy(new Error('Google API request timed out'));
+        else
+            failForwarding(504, 'Google API request timed out');
+        proxyReq.destroy();
+    });
+    res.once('close', () => {
+        if (!res.writableFinished)
+            proxyReq.destroy();
     });
     if (reqBody) {
         proxyReq.write(reqBody);
@@ -1025,13 +1062,20 @@ function handleRequest(req, res) {
                         });
                         return;
                     }
-                    // Restore a switched parent's history, keeping the native tool schema.
+                    // Restore history and expose custom subagent selectors to native parents,
+                    // preserving the original placement of Cloud Code envelope metadata.
                     const nativeBody = {
                         ...(reqJson.request || reqJson),
                         contents: prepared.body.contents,
+                        tools: prepared.body.tools,
                     };
                     const forwarded = reqJson.request ? { ...reqJson, request: nativeBody } : { ...reqJson, ...nativeBody };
-                    proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)));
+                    proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)), hasSubagentTool(actualGeminiBody)
+                        ? {
+                            context: prepared.context,
+                            resolve: (selector) => (0, subagentModels_1.resolveConfiguredSubagentModel)(customModels, selector)?.name,
+                        }
+                        : undefined);
                     return;
                 }
             }
@@ -1075,7 +1119,12 @@ function handleRequest(req, res) {
                     });
                     return;
                 }
-                proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents })));
+                proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents, tools: prepared.body.tools })), hasSubagentTool(geminiBody)
+                    ? {
+                        context: prepared.context,
+                        resolve: (selector) => (0, subagentModels_1.resolveConfiguredSubagentModel)(customModels, selector)?.name,
+                    }
+                    : undefined);
                 return;
             }
             catch (e) {
@@ -1145,7 +1194,6 @@ function stopProxy() {
         }
         (0, shared_1.stopCleanupInterval)();
         (0, customRequest_1.stopCustomRequests)();
-        subagentRouting_1.subagentRouting.clear();
         cloudCodeRouting?.clear();
         if (server) {
             const closingServer = server;
@@ -1161,6 +1209,8 @@ function stopProxy() {
             });
             electron_log_1.default.info('[Proxy] Server stopped');
         }
+        // Final native responses may create routing markers while shutdown drains.
+        subagentRouting_1.subagentRouting.clear();
         server = null;
         proxyPort = 0;
     })().finally(() => {

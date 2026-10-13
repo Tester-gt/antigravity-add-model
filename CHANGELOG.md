@@ -4,6 +4,7 @@ Release history preserved from the project README. Historical entries describe t
 
 ### Unreleased — Custom model selection for subagents
 
+- Extend custom subagent model selection to built-in Google/Cloud Code parents. Expose custom selectors in their tool schema, preserve wrapped responses, decode compressed JSON/SSE safely, and report routing errors without forwarding invalid tool calls. Add local HTTP coverage for first-child routing, stream framing and native response compatibility.
 - Support enabled configured models in `invoke_subagent` alongside Antigravity's native model tiers. Resolve saved model names without ambiguous aliases or silent fallback from unknown/disabled selections; see [configuration](docs/configuration.md#subagent-model-selection).
 - Isolate each spawn with a temporary route established from the child's prompt before the parent tool result arrives. Avoid collisions between parallel ID-less Google calls and restore original tool arguments before provider translation, including Google-to-OpenAI/Anthropic history replay.
 - Keep routing state bounded and process-local, with explicit expired-route errors. Add local HTTP regressions for JSON/streaming responses, provider switches, concurrent children, and nested inheritance.
