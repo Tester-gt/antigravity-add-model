@@ -1,5 +1,6 @@
 import type { Content, Part, Tool, GenerationConfig } from './types.js';
 import { logger } from './logger.js';
+import { validateCompactionEffort } from './compaction-options.js';
 
 export interface OpenAITextPart {
   type: 'text';
@@ -31,6 +32,7 @@ export interface CoreTool {
 }
 
 export interface MappedRequest {
+  compactionEffort?: string;
   system?: string;
   messages: OpenAIMessage[];
   tools?: Record<string, CoreTool>;
@@ -43,6 +45,7 @@ export interface MappedRequest {
 }
 
 export interface MappedConfig {
+  compactionEffort?: string;
   maxTokens?: number;
   temperature?: number;
   topP?: number;
@@ -282,6 +285,18 @@ export function mapGenerationConfig(config: GenerationConfig | null | undefined)
     result.providerOptions = {
       openai: { reasoningEffort: 'medium' },
     };
+  }
+  if (config.compactionReasoningEffort !== undefined) {
+    let effort;
+    try { effort = validateCompactionEffort(config.compactionReasoningEffort); }
+    catch { throw Object.assign(new Error('Invalid compaction reasoning effort'), { status: 400 }); }
+    if (effort !== 'inherit') {
+      result.compactionEffort = effort;
+      result.providerOptions = { openai: { reasoningEffort: effort } };
+      delete result.temperature;
+      delete result.topP;
+      delete result.topK;
+    }
   }
   return result;
 }

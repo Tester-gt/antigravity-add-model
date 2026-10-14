@@ -235,6 +235,9 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
         }));
         return;
     }
+    // Resolve once before trimming/translating; retries and fallback providers
+    // must preserve the primary model's choice for this compaction operation.
+    const compactionEffort = (0, requestOptions_1.isAntigravityCompactionRequest)(originalBody) ? primary.compactionReasoningEffort : undefined;
     const toolSchemas = (0, utils_1.collectToolSchemas)(originalBody);
     const controller = new AbortController();
     const { signal } = controller;
@@ -328,7 +331,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                                 (model.contextWindow ? Math.min(4000, Math.max(1, Math.floor(model.contextWindow / 4))) : 0));
                         const body = (0, requestOptions_1.trimContext)(originalBody, model.contextWindow, outputBudget);
                         const effectiveModel = outputBudget ? { ...model, maxOutputTokens: outputBudget } : model;
-                        payload = (0, requestOptions_1.applyRequestOptions)(registry.translateRequest(model.provider, body, externalName, format, stateKey), effectiveModel, format, isStream);
+                        payload = (0, requestOptions_1.applyRequestOptions)(registry.translateRequest(model.provider, body, externalName, format, stateKey), effectiveModel, format, isStream, compactionEffort);
                         const target = cloudCode || model.rawUrl
                             ? model.apiUrl
                             : registry.getProviderUrl(model.apiUrl, externalName, isStream, registry.getTranslator(model.provider, format));

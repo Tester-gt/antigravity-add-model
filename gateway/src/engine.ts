@@ -173,6 +173,7 @@ export async function* streamResponse(
 
     const gen = r.execute(providerIds, model, mapped.messages, mapped.tools as any, {
       maxTokens: mapped.maxTokens,
+      compactionEffort: mapped.compactionEffort,
       requestTimeoutMs: config.requestTimeoutMs,
       temperature: mapped.temperature,
       topP: mapped.topP,
@@ -226,6 +227,7 @@ export async function generateResponse(
   try {
     const gen = r.execute(providerIds, model, mapped.messages, mapped.tools as any, {
       maxTokens: mapped.maxTokens,
+      compactionEffort: mapped.compactionEffort,
       requestTimeoutMs: config.requestTimeoutMs,
       temperature: mapped.temperature,
       topP: mapped.topP,

@@ -540,6 +540,23 @@ window.addEventListener('DOMContentLoaded', () => {
             name = `${base}-${index++}`;
         return name;
     }
+    function openDeleteModelModal(model) {
+        const { body, status, close } = openModal('Delete model');
+        body.append(element('p', '', `Delete “${model.displayName || model.name}”?`), element('p', 'agy-muted', 'This removes the saved model configuration from this app.'));
+        const actions = element('div', 'agy-actions');
+        actions.append(button('Cancel', close), button('Delete model', async () => {
+            setStatus(status, 'Deleting model…');
+            requireSuccess(await storageAPI.deleteCustomModel(model.name));
+            // The user may have closed this dialog while storage was updating.
+            const dialogStillOpen = body.isConnected;
+            if (dialogStillOpen)
+                close();
+            await modelsChanged();
+            if (dialogStillOpen && !document.getElementById('agy-modal-overlay'))
+                document.getElementById('agy-add-model')?.focus();
+        }, status, true));
+        body.append(actions);
+    }
     async function renderCustomModelsList() {
         const target = document.getElementById('agy-custom-models-content');
         if (!target)
@@ -612,12 +629,7 @@ window.addEventListener('DOMContentLoaded', () => {
                                     await modelsChanged();
                                 }, status, true));
                             }, rowStatus),
-                        ]), button('Delete', async () => {
-                        if (!window.confirm(`Delete “${model.displayName || model.name}”?`))
-                            return;
-                        requireSuccess(await storageAPI.deleteCustomModel(model.name));
-                        await modelsChanged();
-                    }, rowStatus));
+                        ]), button('Delete', () => openDeleteModelModal(model), rowStatus));
                     row.append(info, actions);
                     group.append(row);
                 }
@@ -721,6 +733,11 @@ window.addEventListener('DOMContentLoaded', () => {
                 value || 'Provider default',
             ]), String(existing?.reasoningEffort || ''));
             const thinking = field(advancedGrid, 'Thinking budget (tokens)', 'agy-thinking-budget', existing?.thinkingBudget != null ? String(existing.thinkingBudget) : '', 'number');
+            const compactionEffort = selectField(advancedGrid, 'Compaction reasoning effort', 'agy-compaction-effort', ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].map((value) => [
+                value,
+                value || 'Use normal model settings',
+            ]), String(existing?.compactionReasoningEffort || ''));
+            advancedGrid.append(element('p', 'agy-muted', 'Only recognized IDE continuation summaries use this effort. Choose low for faster summaries, or none if your model supports disabling reasoning. Normal chat keeps its settings.'));
             const maxOutput = field(advancedGrid, 'Maximum output tokens', 'agy-max-output', existing?.maxOutputTokens != null ? String(existing.maxOutputTokens) : '', 'number');
             const context = field(advancedGrid, 'Context window (tokens)', 'agy-context-window', existing?.contextWindow != null ? String(existing.contextWindow) : '', 'number');
             const timeout = field(advancedGrid, 'Request timeout (milliseconds)', 'agy-timeout', existing?.timeout != null ? String(existing.timeout) : '', 'number');
@@ -844,6 +861,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         }
                         : undefined,
                     reasoningEffort: effort.value || undefined,
+                    compactionReasoningEffort: compactionEffort.value || undefined,
                     thinkingBudget: readNumber(thinking, 'Thinking budget'),
                     maxOutputTokens: readNumber(maxOutput, 'Maximum output tokens', 1),
                     contextWindow: readNumber(context, 'Context window', 1),
@@ -1217,7 +1235,9 @@ window.addEventListener('DOMContentLoaded', () => {
         section.id = 'agy-custom-models-section';
         section.setAttribute('aria-label', 'Custom Models');
         const header = element('div', 'agy-toolbar');
-        header.append(element('h2', '', 'Custom Models'), button('Add model', () => openModelModal(), undefined, true));
+        const addModel = button('Add model', () => openModelModal(), undefined, true);
+        addModel.id = 'agy-add-model';
+        header.append(element('h2', '', 'Custom Models'), addModel);
         const actions = element('div', 'agy-actions');
         actions.append(button('Discover local', discoverLocal), button('Import', () => openImportExport('import')), button('Export', () => openImportExport('export')), button('Remote gateway', openGateway), button('Diagnostics', openDiagnostics));
         const search = field(section, 'Search models', 'agy-model-search', searchTerm, 'search');

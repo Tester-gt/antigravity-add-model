@@ -102,6 +102,30 @@ older turns once a configured context threshold is reached. Compaction makes
 an additional provider request and preserves recent turns and tool exchanges.
 Configure these in the dashboard before enabling them.
 
+### Compaction reasoning effort
+
+Under **Settings → Auto Context Compaction**, set **Compaction Reasoning Effort**
+to `low` for faster summaries, or `none` if the chosen model supports disabling
+reasoning. The default, **Use model settings** (`inherit`), preserves existing
+behavior. Ordinary chat requests keep their own reasoning settings.
+
+You can also set `COMPACTION_REASONING_EFFORT=low` in the gateway environment,
+or `_compaction_reasoning_effort: "low"` in `models.json`. The environment takes
+precedence. Accepted values are `inherit`, `none`, `minimal`, `low`, `medium`,
+`high`, and `xhigh`; support depends on the routed model. The override is applied
+to the summary request only, including its provider/model fallbacks. It works
+with **Compaction Model** when you choose a separate summarizer.
+
+OpenAI-compatible adapters pass the explicit effort, OpenRouter uses its
+`reasoning` object, Anthropic uses thinking controls, and Google uses its
+model-family thinking budget/level. Always-on Google models use their supported
+minimum for `none`; it is not a promise of zero thinking tokens. An unsupported
+option can still fail upstream; the existing truncation fallback then applies.
+This gateway setting controls gateway-generated summaries. For native IDE
+continuation summaries, see the [model editor setting](../docs/configuration.md#compaction-effort).
+Updated desktop proxies forward that explicit choice through imported gateway
+aliases; the gateway preserves it without triggering nested auto-compaction.
+
 ## Lifecycle and data
 
 ```sh

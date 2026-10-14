@@ -220,6 +220,8 @@ Presets fill in defaults; **API format** determines how requests are translated.
 
 Open **Advanced settings** for request limits, reasoning, headers, fallback models, and other overrides. See the [configuration reference](docs/configuration.md) for field definitions and a sample import.
 
+**Compaction reasoning effort** lets recognized IDE context summaries use `low` or `none` while ordinary chat keeps its own effort. The gateway also has a separate summary-effort setting. See [configuration and model support](docs/configuration.md#compaction-effort).
+
 For Google account pooling, choose **Google Cloud Code account pool** and follow the [account setup guide](docs/configuration.md#google-cloud-code-account-pools). Sign in with **Antigravity account** using a recognized IDE **2.5.5** installation, or select **My Desktop OAuth client** to use your own client. Account and service eligibility remain provider-controlled.
 
 ## Optional gateway and web dashboard

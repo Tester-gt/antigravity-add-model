@@ -21,6 +21,7 @@ export interface CustomModel {
     apiFormat?: import('./providers').ApiFormat;
     fallbackModels?: string[];
     reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+    compactionReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
     thinkingBudget?: number;
     maxOutputTokens?: number;
     contextWindow?: number;

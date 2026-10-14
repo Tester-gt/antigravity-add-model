@@ -6,6 +6,7 @@ import { detectModelCapabilities } from './model-capabilities.js';
 import type { ModelCapabilities } from './model-capabilities.js';
 import type { ProviderId } from './adapter.js';
 import { BUILTIN_PROVIDERS } from './provider-catalog.js';
+import { validateCompactionEffort, type CompactionEffort } from './compaction-options.js';
 
 export type RoutingMode = 'priority-chain' | 'per-model-per-provider';
 
@@ -22,6 +23,7 @@ export interface AliasCapabilities {
 export function validateModels(value: unknown): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Model configuration must be an object');
   const data = value as Record<string, any>;
+  if (data._compaction_reasoning_effort !== undefined) validateCompactionEffort(data._compaction_reasoning_effort);
   if (data._routing_mode !== undefined && !['priority-chain', 'per-model-per-provider'].includes(data._routing_mode)) throw new Error('Invalid routing mode');
   if (data._provider_models !== undefined) {
     if (!data._provider_models || typeof data._provider_models !== 'object' || Array.isArray(data._provider_models)) throw new Error('Provider model map must be an object');
@@ -71,6 +73,7 @@ export class ModelResolver {
   compactionThreshold: number = 0.8;
   compactionModel: string = '';
   compactionTailTurns: number = 2;
+  compactionReasoningEffort: CompactionEffort = 'inherit';
 
   constructor() {
     this.load();
@@ -80,12 +83,14 @@ export class ModelResolver {
     this.flatMap = {};
     this.providerMap = {};
     this.aliasCapabilities = {};
+    this.compactionReasoningEffort = 'inherit';
 
     try {
       if (fs.existsSync(MODELS_PATH)) {
         const raw = fs.readFileSync(MODELS_PATH, 'utf-8');
         const file = JSON.parse(raw);
         validateModels(file);
+        this.compactionReasoningEffort = file._compaction_reasoning_effort || 'inherit';
         if (file._provider_models) {
           this.providerMap = file._provider_models;
         }

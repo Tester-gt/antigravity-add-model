@@ -115,8 +115,9 @@ function providerFixture() {
     }
     return { ok: true };
   };
+  const reloadStatus = w.reloadAll;
   w.reloadAll = w.toast = () => {};
-  return { dom, w, calls, providers };
+  return { dom, w, calls, providers, reloadStatus };
 }
 
 test('registry metadata supplies settings, routing and model selectors including future providers', async () => {
@@ -205,5 +206,34 @@ test('Browse discovers new-provider models and discards a temporary key when the
     const last = calls.filter(call => call[0] === 'POST' && call[1] === '/api/provider-models').at(-1);
     assert.equal(last![2].provider, 'novita');
     assert.equal(last![2].apiKey, undefined, 'uses that provider’s saved key instead of the previous temporary key');
+  } finally { dom.window.close(); }
+});
+
+test('compaction effort loads independently and the settings form submits the selected override', async () => {
+  const { dom, w, calls, reloadStatus } = providerFixture();
+  try {
+    w.reloadAll = reloadStatus;
+    w.loadLocalProviders = w.updateAuthStatus = w.updateProviderSettings = () => {};
+    let effort: string | undefined = 'low';
+    w.api = async (...args: any[]) => {
+      calls.push(args);
+      if (args[1] === '/api/status') return {
+        stats: { totalRequests: 0, totalTokens: 0, totalToolCalls: 0, errors: 0 },
+        env: {}, providerPriority: [], providers: [], compactionReasoningEffort: effort,
+      };
+      return { ok: true };
+    };
+    await w.reloadAll();
+    const select = w.document.getElementById('cfgCompactionEffort');
+    assert.equal(select.value, 'low');
+    assert.deepEqual(Array.from(select.options, (option: any) => option.value), ['inherit', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+    select.value = 'none';
+    await w.saveConfig();
+    const saved = calls.find(call => call[0] === 'POST' && call[1] === '/api/config')![2];
+    assert.equal(saved.COMPACTION_REASONING_EFFORT, 'none');
+    assert.equal(calls.some(call => call[1] === '/api/reasoning-effort'), false, 'normal model effort is not edited');
+    effort = undefined;
+    await w.reloadAll();
+    assert.equal(select.value, 'inherit');
   } finally { dom.window.close(); }
 });

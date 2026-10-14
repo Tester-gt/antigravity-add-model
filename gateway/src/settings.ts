@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import dotenv from 'dotenv';
 import { USER_ENV_PATH, migrateUserData, dataFile } from './data-paths.js';
 import { workersAIBaseUrl } from './provider-endpoints.js';
+import { validateCompactionEffort } from './compaction-options.js';
 
 /** Validation errors are safe to show; filesystem failures remain generic in the dashboard. */
 export class SettingsValidationError extends Error {}
@@ -35,6 +36,10 @@ export function writeSettings(updates: Record<string, unknown>): void {
     if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || /[\r\n\0]/.test(value)) throw new Error('Settings must contain uppercase keys and single-line string values');
     if ((key === 'AG_GATEWAY_TOKEN' || key === 'DASHBOARD_PASSWORD') && value.length < 16) throw new Error(`${key} must contain at least 16 characters`);
     if (key === 'DASHBOARD_USER' && !value.trim()) throw new Error('Dashboard username cannot be empty');
+    if (key === 'COMPACTION_REASONING_EFFORT') {
+      try { validateCompactionEffort(value); }
+      catch { throw new SettingsValidationError('Invalid compaction reasoning effort'); }
+    }
     current[key] = value;
   }
   // Check the complete effective configuration before touching the file. A key

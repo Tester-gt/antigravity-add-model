@@ -254,7 +254,7 @@ describe('model storage and compatibility', () => {
     );
   });
 
-  it('keeps login tokens in the main process until the masked account is saved', async () => {
+  it('keeps login tokens in the main process and expires unsaved masked accounts', async () => {
     const { directory } = setup();
     let now = 1000;
     const account = {
@@ -283,6 +283,109 @@ describe('model storage and compatibility', () => {
     expect(() => manager.saveModel({ ...googleEntry, name: 'models/expired', googleAccounts: [next.account] })).toThrow(
       'expired',
     );
+  });
+
+  it('saves every selected catalog model and can refetch using the same masked Google login', async () => {
+    const { directory } = setup();
+    let requests = 0;
+    const destination = await server(async (req, res) => {
+      requests++;
+      expect(req.url).toBe('/v1internal:fetchAvailableModels');
+      expect(req.headers.authorization).toBe('Bearer private-batch-access');
+      res.end(JSON.stringify({ models: { 'gemini-first': {}, 'gemini-second': {}, 'gemini-third': {} } }));
+    });
+    const account = {
+      id: 'batch-login',
+      clientId: 'fixture.apps.googleusercontent.com',
+      accessToken: 'private-batch-access',
+      refreshToken: 'private-batch-refresh',
+      clientSecret: 'private-batch-client',
+      expiresAt: Date.now() + 3600000,
+    };
+    const manager = createModelManager(directory, codec, async () => {}, {
+      loginGoogleAccount: async () => account,
+      refreshGoogleAccount: async (value) => value,
+    });
+    const login = await manager.googleLogin({ clientId: account.clientId });
+    const probe = { provider: googleEntry.provider, apiUrl: destination, googleAccounts: [login.account] };
+    const catalog = await manager.discoverModels(probe);
+    for (const model of catalog.models) {
+      manager.saveModel({
+        ...googleEntry,
+        ...probe,
+        name: `models/${model.id}`,
+        externalModelName: model.id,
+      });
+    }
+    expect(manager.store.read().map((model) => model.externalModelName)).toEqual([
+      'gemini-first',
+      'gemini-second',
+      'gemini-third',
+    ]);
+    await expect(manager.discoverModels(probe)).resolves.toEqual(catalog);
+    expect(requests).toBe(2);
+    for (const model of manager.store.read()) {
+      expect(model.encryptedGoogleAccounts).toBe(true);
+      const saved = (model.googleAccounts as GoogleAccount[])[0];
+      for (const field of ['accessToken', 'refreshToken', 'clientSecret'] as const)
+        expect(codec.decryptString(saved[field]!)).toBe(account[field]);
+    }
+    expect(fs.readFileSync(manager.store.filename, 'utf8')).not.toContain('private-batch-');
+    expect(JSON.stringify(login)).not.toContain('private-batch-');
+    expect(JSON.stringify(manager.store.list())).not.toContain('private-batch-');
+  });
+
+  it('does not extend the login expiry on batch saves or borrow credentials from saved models after expiry', async () => {
+    const { directory } = setup();
+    let now = 1000;
+    const account = {
+      id: 'expiring-batch',
+      clientId: 'fixture.apps.googleusercontent.com',
+      accessToken: 'private-expiring-access',
+      refreshToken: 'private-expiring-refresh',
+    };
+    const manager = createModelManager(directory, codec, async () => {}, {
+      loginGoogleAccount: async () => account,
+      now: () => now,
+    });
+    const login = await manager.googleLogin({ clientId: account.clientId });
+    const expiresAt = now + 10 * 60 * 1000;
+    now = expiresAt - 2;
+    manager.saveModel({ ...googleEntry, googleAccounts: [login.account] });
+    now++;
+    manager.saveModel({ ...googleEntry, name: 'models/second', googleAccounts: [login.account] });
+    now = expiresAt;
+    expect(() =>
+      manager.saveModel({ ...googleEntry, name: 'models/expired-third', googleAccounts: [login.account] }),
+    ).toThrow('Account credentials expired or unavailable');
+    expect(manager.store.read()).toHaveLength(2);
+    // Editing an existing model still resolves only that model's saved credentials.
+    const saved = manager.store.list()[0];
+    manager.saveModel({ ...saved, displayName: 'Edited after login expiry' });
+    expect(manager.store.list()[0].displayName).toBe('Edited after login expiry');
+  });
+
+  it('prefers a saved model\'s edited credentials over the retained pending login', async () => {
+    const { directory } = setup();
+    const account = {
+      id: 'edited-batch',
+      clientId: 'fixture.apps.googleusercontent.com',
+      accessToken: 'private-original-access',
+      refreshToken: 'private-original-refresh',
+    };
+    const manager = createModelManager(directory, codec, async () => {}, {
+      loginGoogleAccount: async () => account,
+    });
+    const login = await manager.googleLogin({ clientId: account.clientId });
+    manager.saveModel({ ...googleEntry, googleAccounts: [login.account] });
+    manager.saveModel({
+      ...googleEntry,
+      googleAccounts: [{ ...account, accessToken: 'private-edited-access', refreshToken: 'private-edited-refresh' }],
+    });
+    manager.saveModel({ ...manager.store.list()[0], displayName: 'Edited label' });
+    const saved = (manager.store.read()[0].googleAccounts as GoogleAccount[])[0];
+    expect(codec.decryptString(saved.accessToken!)).toBe('private-edited-access');
+    expect(codec.decryptString(saved.refreshToken!)).toBe('private-edited-refresh');
   });
 
   it('resolves saved masked tokens for quota checks without saving unsaved edits', async () => {

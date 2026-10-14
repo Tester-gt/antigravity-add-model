@@ -239,6 +239,12 @@ export class OpenAICompatAdapter implements ModelAdapter {
     const perModelEffort = getEffortForModel(model);
     const effort = explicitEffort || (perModelEffort && perModelEffort !== 'default' ? perModelEffort : null);
     if (effort) body.reasoning_effort = effort;
+    if (config?.compactionEffort && this.provider === 'openrouter') {
+      delete body.reasoning_effort;
+      body.reasoning = config.compactionEffort === 'none'
+        ? { effort: 'none', enabled: false }
+        : { effort: config.compactionEffort, enabled: true };
+    }
     // SiliconFlow's DeepSeek V3.1 endpoint requires thinking disabled with tools.
     if (this.provider === 'siliconflow' && body.tools && /deepseek-v3\.1(?:$|[-/])/i.test(model)) body.enable_thinking = false;
     return body;

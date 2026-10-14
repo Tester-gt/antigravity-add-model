@@ -48,6 +48,8 @@ export interface Schema {
 }
 
 export interface GenerationConfig {
+  /** Addon-to-gateway metadata for an already recognized IDE summary. */
+  compactionReasoningEffort?: string;
   maxOutputTokens?: number;
   temperature?: number;
   topP?: number;

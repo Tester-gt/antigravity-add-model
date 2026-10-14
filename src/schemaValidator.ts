@@ -146,8 +146,10 @@ export function validateCustomModel(model: unknown): ValidationResult {
   for (const field of ['enabled', 'rawUrl', 'gateway', 'supportsVision', 'supportsThinking', 'encryptedHeaders', 'encryptedGoogleAccounts']) {
     if (m[field] !== undefined && typeof m[field] !== 'boolean') return { valid: false, error: `${field} must be a boolean` };
   }
-  if (m.reasoningEffort !== undefined && !['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(m.reasoningEffort as string)) {
-    return { valid: false, error: 'Invalid reasoningEffort' };
+  for (const field of ['reasoningEffort', 'compactionReasoningEffort']) {
+    if (m[field] !== undefined && !['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(m[field] as string)) {
+      return { valid: false, error: `Invalid ${field}` };
+    }
   }
   for (const field of ['contextWindow', 'maxOutputTokens', 'thinkingBudget', 'timeout', 'idleTimeout', 'retryBudgetMs', 'maxRetries']) {
     const value = m[field];

@@ -322,7 +322,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           Auto Context Compaction
         </h3>
-        <div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr">
+        <div class="form-row" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
           <div class="form-group">
             <label>Enabled</label>
             <select id="cfgCompactionEnabled">
@@ -340,6 +340,19 @@
             <label>Compaction Model</label>
             <input type="text" id="cfgCompactionModel" placeholder="Same as request">
             <div class="hint">Model for summarization (leave empty to use request model)</div>
+          </div>
+          <div class="form-group">
+            <label for="cfgCompactionEffort">Compaction Reasoning Effort</label>
+            <select id="cfgCompactionEffort">
+              <option value="inherit">Use model settings</option>
+              <option value="none">none (disable if supported)</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+            <div class="hint">Only gateway summary calls use this effort. Normal chat keeps its settings. Supported levels depend on the model.</div>
           </div>
           <div class="form-group">
             <label>Tail Turns</label>
@@ -994,6 +1007,7 @@ async function reloadAll() {
     if (cmEl) cmEl.value = s.compactionModel || '';
     const cttEl = document.getElementById('cfgCompactionTailTurns');
     if (cttEl) cttEl.value = s.compactionTailTurns || '2';
+    document.getElementById('cfgCompactionEffort').value = s.compactionReasoningEffort || 'inherit';
     // Auth status
     updateAuthStatus(s);
     updateProviderSettings(s);
@@ -1525,6 +1539,7 @@ async function saveConfig() {
     COMPACTION_THRESHOLD: document.getElementById('cfgCompactionThreshold').value,
     COMPACTION_MODEL: document.getElementById('cfgCompactionModel').value,
     COMPACTION_TAIL_TURNS: document.getElementById('cfgCompactionTailTurns').value,
+    COMPACTION_REASONING_EFFORT: document.getElementById('cfgCompactionEffort').value,
   };
   deleteEmpty(u);
   Object.assign(u, collectProviderSettings());

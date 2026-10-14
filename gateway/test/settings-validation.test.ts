@@ -51,3 +51,15 @@ test('invalid Workers AI URL edits are rejected even before enabling the provide
   assert.throws(() => writeSettings({ WORKERS_AI_BASE_URL: baseUrl.replace('0123456789abcdef0123456789abcdef', 'invalid') }), /WORKERS_AI_BASE_URL|account/);
   assert.equal(fs.readFileSync(filename, 'utf8'), original);
 });
+
+test('compaction effort accepts explicit levels and rejects invalid settings before writing any field', () => {
+  for (const effort of ['inherit', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh']) {
+    writeSettings({ COMPACTION_REASONING_EFFORT: effort });
+    assert.equal(readSettings().COMPACTION_REASONING_EFFORT, effort);
+  }
+  const before = fs.readFileSync(filename, 'utf8');
+  for (const value of ['turbo', 'LOW', '', 'default', null, 0]) {
+    assert.throws(() => writeSettings({ LOG_LEVEL: 'debug', COMPACTION_REASONING_EFFORT: value }), /compaction reasoning effort|single-line string/);
+    assert.equal(fs.readFileSync(filename, 'utf8'), before);
+  }
+});

@@ -98,6 +98,7 @@ are supported in configuration but do not have a separate editor control.
 | `apiKey` | Provider key; empty for a local endpoint without authentication. Saved values are masked. |
 | `enabled` | Defaults to enabled; disabled models stay saved but leave the custom picker and fallback chain. |
 | `reasoningEffort` | Optional `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`; sent for the OpenAI format when configured. Model support varies. |
+| `compactionReasoningEffort` | Optional `none`, `minimal`, `low`, `medium`, `high`, or `xhigh` for recognized IDE continuation summaries only. Omit to keep normal model settings. See [compaction effort](#compaction-effort). |
 | `thinkingBudget` | Nonnegative token budget for supported Google/Anthropic requests. For Anthropic, `0` disables thinking; otherwise use at least `1024` and less than the output limit. |
 | `maxOutputTokens`, `contextWindow` | Positive token limits. If both exist, output must be smaller than context. Limits cannot enlarge the upstream model's capacity. |
 | `timeout` | Per-attempt timeout in milliseconds; default `120000`. |
@@ -124,6 +125,45 @@ for worked examples, retry timing and the separate MCP delegation behavior.
 Old DeepSeek, Kimi, Fireworks, LM Studio, and llama.cpp entries without
 `apiFormat` retain their historical Anthropic format. Select the intended format
 explicitly when migrating a configuration.
+
+## Compaction effort
+
+In the model editor, open **Advanced settings → Compaction reasoning effort**.
+Choose **low** to reduce thinking during context summaries while keeping your
+normal chat effort, such as **xhigh**. Choose **none** only when your model
+supports disabling reasoning. **Use normal model settings** is the default and
+removes the override. JSON/import users can add these fields to a saved model:
+
+```json
+{
+  "reasoningEffort": "xhigh",
+  "compactionReasoningEffort": "low"
+}
+```
+
+The desktop/IDE proxy recognizes the continuation-summary template from the
+verified Antigravity IDE **2.5.5** language server in the final user turn. Earlier
+history, tool results, quoted examples and ordinary requests to summarize a
+document keep their normal settings. Other IDE versions or summary templates
+may not match. The override is request-local and follows retries/fallbacks;
+it does not rewrite the saved chat settings or enable compaction itself.
+Imported gateway routes carry this explicit choice to the gateway, which applies
+it after resolving the provider and avoids starting a second summary of that
+summary request. Update both components when using this route.
+
+OpenAI-compatible requests use `reasoning_effort`; OpenRouter uses its unified
+`reasoning` object. Anthropic uses a thinking budget (1024 tokens for low/minimal)
+or `thinking: {"type": "disabled"}` for none. Enabled Anthropic thinking needs
+an output limit above 1024. Google 2.5 uses token budgets; Google 3+ uses thinking
+levels. Always-on models cannot guarantee no reasoning: Gemini 2.5 Pro keeps
+its 128-token minimum, and Gemini 3+ uses a supported minimal/low level for none.
+Supported levels vary by model; an unsupported upstream option may still be
+rejected. See the [Google thinking reference](https://ai.google.dev/gemini-api/docs/generate-content/thinking)
+and [Anthropic thinking reference](https://platform.claude.com/docs/en/build-with-claude/thinking).
+
+The optional gateway has its own **Auto Context Compaction → Compaction Reasoning
+Effort** setting for the extra summary requests it creates. Configure that
+separately in the [gateway dashboard](../gateway/README.md#compaction-reasoning-effort).
 
 ## Subagent model selection
 
@@ -199,7 +239,7 @@ the IDE's existing Google session.
 1. Under **Sign in with Google**, leave **Sign-in method → Antigravity account** selected. The addon reads the personal-account OAuth client profile from a recognized local **Antigravity IDE 2.5.5** installation; you do not need to create a Google Cloud OAuth client for this option. For a portable installation, set `ANTIGRAVITY_IDE_RESOURCES` to its `resources` directory before starting the app or proxy service. Unknown versions or layouts produce an explicit error rather than selecting a different client.
 2. Click **Sign in with Google** and complete browser consent. Both sign-in methods use [installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app) with PKCE, state validation and a temporary loopback callback. Antigravity mode uses the recognized app's scope set; custom mode requests `cloud-platform`. Browser sign-in expires after two minutes and can be cancelled.
 3. Antigravity sign-in then prepares the account's Cloud Code project and service endpoint. If first-time enrollment is needed, this explicit action can request the **free tier only**; Google still decides eligibility. It does not enroll in a paid tier. Wait for preparation to finish before saving.
-4. Repeat for each account, then **Save model** within **10 minutes** of each successful sign-in. Pending credentials stay in main-process memory; the UI receives masked fields. Saved tokens and client secrets are encrypted. Sign in again if an unsaved entry expires.
+4. Repeat for each account, then **Save model** within **10 minutes** of each successful sign-in. You can also fetch the catalog and **Add selected** to save several models with the same account. Saving one model no longer consumes the pending credentials needed by the remaining selections, and does not extend their original expiry. Pending credentials stay in main-process memory; the UI receives masked fields. Saved tokens and client secrets are encrypted. Sign in again if an unsaved entry expires.
 5. Use **Test account** for access and quota, **Fetch provider models** for the catalog, and **Test generation** for a short model response. These check different things: successful login, project preparation or model listing does not establish successful generation. **Pool status** shows the current state; quota refresh is explicit, not periodic.
 
 To keep using your own client, select **My Desktop OAuth client**, enter its

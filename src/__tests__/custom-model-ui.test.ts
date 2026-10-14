@@ -174,7 +174,9 @@ async function fixture(
   Object.assign(dom.window, {
     nativeStorage: vendorStorage,
     fetch: vi.fn(async () => new Response('{"models":{}}', { headers: { 'content-type': 'application/json' } })),
-    confirm: vi.fn(() => true),
+    confirm: vi.fn(() => {
+      throw new Error('Blocking native confirmation dialogs must not be used.');
+    }),
   });
   runInContext(preload, context);
   dom.window.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
@@ -198,6 +200,101 @@ async function fixture(
 }
 
 describe('custom model settings in the preserved vendor preload', () => {
+  it.each(['Cancel', 'Escape', 'Close'])('cancels model deletion with %s without changing storage', async (action) => {
+    const f = await fixture();
+    const deleteButton = [...f.document.querySelectorAll<HTMLButtonElement>('button')].find(
+      (node) => node.textContent === 'Delete',
+    )!;
+    deleteButton.focus();
+    await f.click('Delete');
+    const dialog = f.document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.textContent).toContain('Delete “Primary”?');
+    expect(f.invoke).not.toHaveBeenCalledWith('storage:delete-custom-model', model.name);
+    if (action === 'Escape')
+      dialog.dispatchEvent(new f.dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    else await f.click(action, dialog);
+    expect(f.document.getElementById('agy-modal-overlay')).toBeNull();
+    expect(f.document.activeElement).toBe(deleteButton);
+    expect(deleteButton.disabled).toBe(false);
+    expect(f.invoke).not.toHaveBeenCalledWith('storage:delete-custom-model', model.name);
+    expect(f.getModels()).toHaveLength(1);
+    expect(f.dom.window.confirm).not.toHaveBeenCalled();
+  });
+
+  it('deletes through an in-app dialog and keeps Add model and the native prompt focusable', async () => {
+    const f = await fixture(
+      '<section id="settings"><h2>Models &amp; Usage</h2><button id="native-refresh">Refresh</button></section><textarea id="native-prompt"></textarea>',
+    );
+    const refresh = vi.fn(() => expect(f.document.getElementById('agy-modal-overlay')).toBeNull());
+    f.document.getElementById('native-refresh')!.addEventListener('click', refresh);
+    await f.click('Delete');
+    await f.click('Delete model', f.document.querySelector('[role="dialog"]')!);
+    expect(f.invoke.mock.calls.filter(([channel]) => channel === 'storage:delete-custom-model')).toEqual([
+      ['storage:delete-custom-model', model.name],
+    ]);
+    expect(f.getModels()).toHaveLength(0);
+    expect(f.document.getElementById('agy-modal-overlay')).toBeNull();
+    expect(f.document.activeElement).toBe(f.document.getElementById('agy-add-model'));
+    expect(refresh).toHaveBeenCalledOnce();
+    await f.click('Add model');
+    const provider = f.input('agy-provider', 'ollama');
+    provider.focus();
+    provider.dispatchEvent(new f.dom.window.Event('change'));
+    expect(f.document.activeElement).toBe(provider);
+    const modelId = f.input('agy-model-id', 'replacement-model');
+    modelId.focus();
+    expect(f.document.activeElement).toBe(modelId);
+    expect(modelId.disabled).toBe(false);
+    expect(f.input('agy-api-url').value).toBe('http://127.0.0.1:11434/v1');
+    await f.click('Close', f.document.querySelector('[role="dialog"]')!);
+    const prompt = f.document.getElementById('native-prompt') as HTMLTextAreaElement;
+    prompt.focus();
+    prompt.value = 'The prompt is still available';
+    expect(f.document.activeElement).toBe(prompt);
+    expect(f.document.getElementById('agy-modal-overlay')).toBeNull();
+    expect(f.dom.window.confirm).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed deletion visible and allows a retry', async () => {
+    const f = await fixture();
+    const remove = f.handlers['storage:delete-custom-model'];
+    f.handlers['storage:delete-custom-model'] = () => ({ success: false, error: 'Could not write model settings.' });
+    await f.click('Delete');
+    const dialog = f.document.querySelector('[role="dialog"]')!;
+    await f.click('Delete model', dialog);
+    expect(dialog.querySelector('[role="status"]')!.textContent).toBe('Could not write model settings.');
+    expect(f.getModels()).toHaveLength(1);
+    expect([...dialog.querySelectorAll('button')].every((node) => !node.disabled)).toBe(true);
+    f.handlers['storage:delete-custom-model'] = remove;
+    await f.click('Delete model', dialog);
+    expect(f.getModels()).toHaveLength(0);
+    expect(f.document.getElementById('agy-modal-overlay')).toBeNull();
+  });
+
+  it('does not close a new dialog when a previously confirmed deletion finishes', async () => {
+    const f = await fixture();
+    const remove = f.handlers['storage:delete-custom-model'];
+    let finish!: () => void;
+    f.handlers['storage:delete-custom-model'] = (name) => new Promise((resolve) => {
+      finish = () => resolve(remove(name));
+    });
+    await f.click('Delete');
+    await f.click('Delete model', f.document.querySelector('[role="dialog"]')!);
+    await f.click('Close', f.document.querySelector('[role="dialog"]')!);
+    await f.click('Add model');
+    const input = f.input('agy-model-id', 'new-model');
+    input.focus();
+    finish();
+    await settle();
+    expect(f.getModels()).toHaveLength(0);
+    expect(f.document.getElementById('agy-modal-title')!.textContent).toBe('Add custom model');
+    expect(f.document.activeElement).toBe(input);
+    expect(input.value).toBe('new-model');
+    await f.click('Close', f.document.querySelector('[role="dialog"]')!);
+    expect(f.document.getElementById('agy-modal-overlay')).toBeNull();
+  });
+
   it('explains when a model has no available native picker identity', async () => {
     const f = await fixture(undefined, [{ ...model, nativePickerAvailable: false }]);
     expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain(
@@ -245,6 +342,40 @@ describe('custom model settings in the preserved vendor preload', () => {
     expect(f.invoke).not.toHaveBeenCalledWith('storage:create-effort-variants', model.name);
     await f.click('Create three variants');
     expect(f.invoke).toHaveBeenCalledWith('storage:create-effort-variants', model.name);
+  });
+
+  it('saves and clears compaction effort independently of normal reasoning settings', async () => {
+    const f = await fixture(undefined, [{ ...model, reasoningEffort: 'xhigh', thinkingBudget: 8192 }]);
+    await f.click('Edit');
+    expect(f.input('agy-compaction-effort').value).toBe('');
+    f.input('agy-compaction-effort', 'low');
+    await f.click('Save model');
+    expect(f.getModels()[0]).toMatchObject({
+      reasoningEffort: 'xhigh',
+      thinkingBudget: 8192,
+      compactionReasoningEffort: 'low',
+    });
+    await f.click('Edit');
+    expect(f.input('agy-compaction-effort').value).toBe('low');
+    expect(f.input('agy-reasoning-effort').value).toBe('xhigh');
+    expect(f.input('agy-thinking-budget').value).toBe('8192');
+    f.input('agy-compaction-effort', 'none');
+    await f.click('Save model');
+    expect(f.getModels()[0]).toMatchObject({
+      reasoningEffort: 'xhigh',
+      thinkingBudget: 8192,
+      compactionReasoningEffort: 'none',
+    });
+    await f.click('Edit');
+    expect(f.input('agy-compaction-effort').value).toBe('none');
+    f.input('agy-compaction-effort', '');
+    await f.click('Save model');
+    expect(f.getModels()[0]).toMatchObject({ reasoningEffort: 'xhigh', thinkingBudget: 8192 });
+    expect(f.getModels()[0].compactionReasoningEffort).toBeUndefined();
+    await f.click('Edit');
+    expect(f.input('agy-compaction-effort').value).toBe('');
+    expect(f.input('agy-reasoning-effort').value).toBe('xhigh');
+    expect(f.input('agy-thinking-budget').value).toBe('8192');
   });
 
   it('offers adaptive account selection without changing an existing strategy', async () => {

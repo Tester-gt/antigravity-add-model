@@ -6,6 +6,8 @@ import { config } from './config.js';
 import { getContextWindow } from './context-windows.js';
 import { modelResolver } from './models.js';
 
+import { validateCompactionEffort } from './compaction-options.js';
+
 const DEFAULT_THRESHOLD = 0.8;
 const DEFAULT_TAIL_TURNS = 2;
 
@@ -83,6 +85,7 @@ export async function compactIfNeeded(
   router: Router,
   signal?: AbortSignal,
 ): Promise<MappedRequest> {
+  if (mapped.compactionEffort) return mapped;
   const cfg = getCompactionConfig();
   if (!cfg.enabled) return mapped;
 
@@ -111,7 +114,13 @@ export async function compactIfNeeded(
       compactionModel,
       [{ role: 'user', content: prompt }],
       undefined,
-      { maxTokens: 2048, temperature: 0.3 },
+      {
+        maxTokens: 2048,
+        ...(cfg.effort === 'inherit' ? { temperature: 0.3 } : {
+          providerOptions: { openai: { reasoningEffort: cfg.effort } },
+          compactionEffort: cfg.effort,
+        }),
+      },
       signal,
     );
 
@@ -149,5 +158,6 @@ export function getCompactionConfig() {
     threshold: parseFloat(process.env.COMPACTION_THRESHOLD || String(modelResolver.compactionThreshold)),
     tailTurns: parseInt(process.env.COMPACTION_TAIL_TURNS || String(modelResolver.compactionTailTurns), 10),
     model: process.env.COMPACTION_MODEL || modelResolver.compactionModel,
+    effort: validateCompactionEffort(process.env.COMPACTION_REASONING_EFFORT || modelResolver.compactionReasoningEffort),
   };
 }

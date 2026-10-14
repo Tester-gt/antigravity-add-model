@@ -354,7 +354,8 @@ export function createModelManager(
     store.save(model);
     if (Array.isArray(model.googleAccounts))
       for (const account of model.googleAccounts) {
-        pending.delete(account.id);
+        // A catalog selection can save several models with the same masked account.
+        // Keep its pending credentials until their existing expiry; saving must not renew it.
         resetGoogleAccountState(account.id);
       }
     return { success: true };

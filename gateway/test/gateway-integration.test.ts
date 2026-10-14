@@ -362,6 +362,94 @@ test('reasoning options and opt-in context compaction affect upstream payloads',
   await api('/api/models', setup);
 });
 
+test('compaction effort overrides only the summary request and settings reload restores inheritance', async () => {
+  const compact = { ...setup, _compaction_enabled: true, _compaction_threshold: 0.5, _compaction_tail_turns: 1, _context_windows: { demo: 256 } };
+  const contents = [
+    { role: 'user', parts: [{ text: 'earlier context '.repeat(500) }] },
+    { role: 'model', parts: [{ text: 'old answer' }] },
+    { role: 'user', parts: [{ text: 'recent question' }] },
+    { role: 'model', parts: [{ text: 'recent answer' }] },
+    { role: 'user', parts: [{ text: 'continue' }] },
+  ];
+  assert.equal((await api('/api/reasoning-effort', { model: 'demo', effort: 'high' })).status, 200);
+  try {
+    for (const effort of ['low', 'none']) {
+      assert.equal((await api('/api/models', { ...compact, _compaction_reasoning_effort: effort })).status, 200);
+      assert.equal((await (await api('/api/status')).json() as any).compactionReasoningEffort, effort);
+      const start = requested.length;
+      assert.equal((await generate(false, { contents })).status, 200);
+      const calls = requested.slice(start);
+      assert.equal(calls.length, 2, 'one summary and one final generation');
+      assert.match(calls[0].body.messages[0].content, /^You are a conversation summarizer\./);
+      assert.equal(calls[0].body.reasoning_effort, effort);
+      assert.equal(calls[0].body.temperature, undefined, 'explicit effort avoids conflicting temperature');
+      assert.equal(calls[1].body.reasoning_effort, 'high', 'normal chat retains its configured effort');
+      assert.ok(calls[1].body.messages.some((m: any) => String(m.content).includes('[Context compacted]')));
+    }
+    assert.equal((await api('/api/models', compact)).status, 200);
+    assert.equal((await (await api('/api/status')).json() as any).compactionReasoningEffort, 'inherit');
+    const start = requested.length;
+    assert.equal((await generate(false, { contents })).status, 200);
+    assert.equal(requested[start].body.temperature, 0.3, 'inherit preserves previous summary behavior');
+    assert.equal(requested[start + 1].body.reasoning_effort, 'high');
+  } finally {
+    await api('/api/models', setup);
+    await api('/api/reasoning-effort', { model: 'demo', effort: 'default' });
+  }
+});
+
+test('invalid compaction effort updates preserve the complete saved settings and model routing', async () => {
+  const envFile = path.join(process.env.AG_GATEWAY_DATA_DIR!, '.env');
+  const modelsFile = path.join(process.env.AG_GATEWAY_DATA_DIR!, 'models.json');
+  const beforeEnv = fs.readFileSync(envFile, 'utf8');
+  const beforeModels = fs.readFileSync(modelsFile, 'utf8');
+  assert.equal((await api('/api/config', { COMPACTION_REASONING_EFFORT: 'turbo', LOG_LEVEL: 'debug' })).status, 400);
+  assert.equal(fs.readFileSync(envFile, 'utf8'), beforeEnv);
+  assert.equal((await api('/api/models', { ...setup, _compaction_reasoning_effort: 'turbo', _provider_models: {} })).status, 400);
+  assert.equal(fs.readFileSync(modelsFile, 'utf8'), beforeModels);
+  assert.equal((await generate()).status, 200);
+});
+
+test('native compaction metadata crosses the gateway without a nested summary and never changes ordinary chat effort', async () => {
+  const compact = { ...setup, _compaction_enabled: true, _compaction_threshold: 0.5, _compaction_tail_turns: 1, _compaction_reasoning_effort: 'low', _context_windows: { demo: 256 } };
+  const contents = [
+    { role: 'user', parts: [{ text: 'native summary context '.repeat(500) }] },
+    { role: 'model', parts: [{ text: 'old answer' }] },
+    { role: 'user', parts: [{ text: 'recent question' }] },
+    { role: 'model', parts: [{ text: 'recent answer' }] },
+    { role: 'user', parts: [{ text: 'compact this history' }] },
+  ];
+  assert.equal((await api('/api/models', compact)).status, 200);
+  assert.equal((await api('/api/reasoning-effort', { model: 'demo', effort: 'high' })).status, 200);
+  try {
+    for (const stream of [false, true]) {
+      const start = requested.length;
+      const response = await generate(stream, {
+        contents,
+        generationConfig: { compactionReasoningEffort: 'none', maxOutputTokens: 2048, temperature: 0.8, topP: 0.9, topK: 40 },
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.equal(requested.length - start, 1, 'native compaction must not trigger a second gateway summary');
+      assert.equal(requested[start].body.reasoning_effort, 'none');
+      assert.equal(requested[start].body.temperature, undefined);
+      assert.equal(requested[start].body.top_p, undefined);
+      assert.equal(requested[start].body.compactionReasoningEffort, undefined, 'internal metadata stays off provider payloads');
+    }
+    const normal = await generate();
+    assert.equal(normal.status, 200);
+    await normal.text();
+    assert.equal(requested.at(-1)?.body.reasoning_effort, 'high');
+    const start = requested.length;
+    const invalid = await generate(false, { generationConfig: { compactionReasoningEffort: 'turbo' } });
+    assert.equal(invalid.status, 400);
+    assert.equal(requested.length, start, 'invalid effort is rejected before inference');
+  } finally {
+    await api('/api/models', setup);
+    await api('/api/reasoning-effort', { model: 'demo', effort: 'default' });
+  }
+});
+
 test('applied local endpoints are routable and persist separately', async () => {
   const port = (upstream.address() as any).port;
   const provider = { id: 'testlocal', label: 'Local test', online: true, baseUrl: `http://127.0.0.1:${port}/secondary/v1`, models: ['local-model'], capabilities: { supportsTools: true, supportsStreaming: true, supportsReasoning: false, supportsSystemMessages: true } };

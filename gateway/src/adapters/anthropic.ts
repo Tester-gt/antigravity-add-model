@@ -36,6 +36,7 @@ export class AnthropicAdapter implements ModelAdapter {
   protected thinkingBudget(maxTokens: number, config?: Record<string, unknown>): number | null {
     const providerOptions = (config as any)?.providerOptions;
     const reasoningEffort: string | undefined = providerOptions?.openai?.reasoningEffort;
+    if (config?.compactionEffort === 'none') return null;
     if (!reasoningEffort) return null;
     if (maxTokens <= 1024) throw new Error('Thinking requires maxOutputTokens greater than 1024');
     // Approximate budget_tokens by effort level. Anthropic requires
@@ -45,6 +46,7 @@ export class AnthropicAdapter implements ModelAdapter {
       medium: Math.min(8192, maxTokens - 1),
       high: Math.min(16384, maxTokens - 1),
     };
+    if (config?.compactionEffort === 'low' || config?.compactionEffort === 'minimal') return 1024;
     const budget = budgetByLevel[reasoningEffort] ?? Math.min(8192, maxTokens - 1);
     // Ensure we respect Anthropic's minimum (1024) and stay below max_tokens.
     return Math.max(1024, budget);
@@ -168,6 +170,7 @@ export class AnthropicAdapter implements ModelAdapter {
     // when the user wants visible chain-of-thought. Anthropic uses a different
     // shape: `thinking: { type: 'enabled', budget_tokens: N }`.
     const budget = this.thinkingBudget(maxTokens, config);
+    if (config?.compactionEffort === 'none') body.thinking = { type: 'disabled' };
     if (budget != null) {
       (body as any).thinking = { type: 'enabled', budget_tokens: budget };
     } else {

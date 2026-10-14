@@ -16,7 +16,13 @@ import { describeGoogleAccessError } from '../googleAccessErrors';
 import { beginDiagnosticRequest } from '../diagnostics';
 import * as registry from './registry';
 import { CircuitBreaker } from './circuitBreaker';
-import { applyRequestOptions, GeminiBody, parseRetryAfter, trimContext } from './requestOptions';
+import {
+  applyRequestOptions,
+  GeminiBody,
+  isAntigravityCompactionRequest,
+  parseRetryAfter,
+  trimContext,
+} from './requestOptions';
 import { activeStreamContexts, modelReasoningContent, modelToolCallIds, stateTimestamps } from './shared';
 import { collectToolSchemas } from './translators/utils';
 import { subagentRouting, SubagentRoutingError } from './subagentRouting';
@@ -213,6 +219,9 @@ export async function runCustomModelRequest(
     );
     return;
   }
+  // Resolve once before trimming/translating; retries and fallback providers
+  // must preserve the primary model's choice for this compaction operation.
+  const compactionEffort = isAntigravityCompactionRequest(originalBody) ? primary.compactionReasoningEffort : undefined;
   const toolSchemas = collectToolSchemas(originalBody);
   const controller = new AbortController();
   const { signal } = controller;
@@ -319,6 +328,7 @@ export async function runCustomModelRequest(
               effectiveModel,
               format,
               isStream,
+              compactionEffort,
             );
             const target =
               cloudCode || model.rawUrl

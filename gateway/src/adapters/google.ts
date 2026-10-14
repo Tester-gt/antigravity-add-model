@@ -119,6 +119,22 @@ export class GoogleAdapter implements ModelAdapter {
     if (config?.temperature != null) gc.temperature = config.temperature;
     if (config?.topP != null) gc.topP = config.topP;
     if ((config as any)?.stopSequences?.length) gc.stopSequences = (config as any).stopSequences;
+    const effort = config?.compactionEffort;
+    if (typeof effort === 'string' && effort !== 'inherit') {
+      const name = model.replace(/^models\//, '').toLowerCase();
+      const version = name.match(/(?:^|\/)gemini-(\d+)(?:[.-]|$)/);
+      if (version && Number(version[1]) >= 3) {
+        // Gemini 3+ does not offer a guaranteed off switch. Pro has no minimal level.
+        const supportsMinimal = /(?:^|\/)gemini-(?:3-flash|3\.1-flash-lite|3\.5-flash-lite|3\.6-flash)(?:-|$)/.test(name);
+        let level = effort === 'none' || effort === 'minimal' ? (supportsMinimal ? 'MINIMAL' : 'LOW')
+          : effort === 'xhigh' ? 'HIGH' : effort.toUpperCase();
+        if (/(?:^|\/)gemini-3-pro(?:-|$)/.test(name) && level === 'MEDIUM') level = 'HIGH';
+        gc.thinkingConfig = { thinkingLevel: level };
+      } else {
+        const budgets: Record<string, number> = { none: 0, minimal: 1024, low: 1024, medium: 4096, high: 8192, xhigh: 16384 };
+        gc.thinkingConfig = { thinkingBudget: effort === 'none' && /(?:^|\/)gemini-2\.5-pro(?:-|$)/.test(name) ? 128 : budgets[effort] };
+      }
+    }
     if (Object.keys(gc).length === 0) delete body.generationConfig;
     return body;
   }
