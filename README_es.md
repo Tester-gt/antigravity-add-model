@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README_zh.md">简体中文</a> · <strong>Español</strong>
+  <a href="README.md">English</a> · <a href="README_zh.md">简体中文</a> · <strong>Español</strong> · <a href="README_tr.md">Türkçe</a> · <a href="README_ru.md">Русский</a> · <a href="README_hi.md">हिन्दी</a> · <a href="README_ar.md">العربية</a>
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@ Esta es una guía resumida en español. Las guías técnicas enlazadas están en
 | Conectar servicios | OpenAI, Anthropic, Gemini, OpenRouter, Cloudflare Workers AI y otras API compatibles; Ollama, LM Studio, vLLM y otros servidores locales. |
 | Ajustar solicitudes | Formato de API, razonamiento, límites de contexto y salida, cabeceras, tiempos de espera, reintentos y modelos alternativos. |
 | Elegir modelos de subagentes | En clientes compatibles con `invoke_subagent`; el IDE también admite tareas de texto independientes mediante [herramientas MCP](docs/ide.md#delegate-to-custom-models-with-mcp). |
-| Gestionar cuentas de Google | Hasta 50 cuentas por modelo, OAuth con tu propio cliente, consulta de cuota y selección automática de cuentas elegibles. El inicio de sesión nativo del IDE es independiente. |
+| Gestionar cuentas de Google | Hasta 50 cuentas por modelo, inicio de sesión con **Antigravity account** desde una instalación reconocida del IDE **2.5.5**, o con tu propio cliente OAuth; preparación del proyecto, almacenamiento cifrado, consulta de cuota y selección automática de cuentas elegibles. La sesión existente del IDE es independiente. |
 | Revisar solicitudes | Diagnósticos, latencia, uso de tokens y una prueba explícita de generación. |
 | Usar una pasarela | Panel web, alias, proveedores alternativos, historial y acceso remoto autenticado. |
 
@@ -120,7 +120,7 @@ Para modelos locales, inicia primero el servidor y pulsa **Discover local**. El 
 
 Consulta la [configuración completa](docs/configuration.md), los [requisitos de imágenes](docs/configuration.md#image-inputs) y la [guía de Cloudflare Workers AI](docs/workers-ai-setup.md).
 
-Para cuentas de Google, elige **Google Cloud Code account pool** y sigue la [configuración de cuentas](docs/configuration.md#google-cloud-code-account-pools). Repite el inicio de sesión para añadir cuentas y guarda el modelo. Necesitas tu propio cliente OAuth; este flujo no importa ni sustituye la sesión nativa del IDE. Un 403 indica un problema de acceso; un 429 indica un límite; un 503 puede afectar al proveedor aunque cambies de cuenta.
+Para cuentas de Google, elige **Google Cloud Code account pool** y sigue la [configuración de cuentas](docs/configuration.md#google-cloud-code-account-pools). Usa **Antigravity account** con una instalación reconocida del IDE **2.5.5**, o **My Desktop OAuth client** con tu propio cliente. Repite el inicio de sesión para añadir cuentas y guarda el modelo; este flujo no importa ni sustituye la sesión existente del IDE. Un 403 indica un problema de acceso; un 429 indica un límite; un 503 puede afectar al proveedor aunque cambies de cuenta.
 
 ## Pasarela y acceso remoto
 

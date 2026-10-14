@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <strong>简体中文</strong> · <a href="README_es.md">Español</a>
+  <a href="README.md">English</a> · <strong>简体中文</strong> · <a href="README_es.md">Español</a> · <a href="README_tr.md">Türkçe</a> · <a href="README_ru.md">Русский</a> · <a href="README_hi.md">हिन्दी</a> · <a href="README_ar.md">العربية</a>
 </p>
 
 <p align="center">
@@ -52,7 +52,7 @@
 | **连接主流与本地服务商** | 支持 OpenAI、Anthropic、Gemini、OpenRouter、[Cloudflare Workers AI](docs/providers.md#cloudflare-workers-ai) 等兼容 API；支持 Ollama、LM Studio、vLLM 等本地推理服务。 |
 | **精细化请求调优** | 协议选择、推理/思考（Reasoning）参数设置、上下文/输出长度限制、自定义请求头、超时控制、自动重试、回退模型（Fallback）及熔断器（Circuit Breaker）。 |
 | **选择子代理模型** | 内置模型或自定义模型均可通过 `invoke_subagent` 将任务委派给已配置并启用的模型；并行子代理的路由相互独立，切换服务商时保留原始工具调用历史。[配置说明](docs/configuration.md#subagent-model-selection)。 |
-| **Google 账号池支持** | 使用你自己的客户端进行显式 OAuth 登录、加密凭据存储、配额检查、自适应账号轮询以及模型级别的冷却时间管理。 |
+| **Google 账号池支持** | 使用受识别的 IDE **2.5.5** 安装通过 **Antigravity account** 登录，或使用自己的 OAuth 客户端；支持项目准备、凭据加密存储、配额检查、自适应账号选择及模型级别的冷却时间。[真实登录、令牌刷新与生成验证结果](docs/configuration.md#verified-google-account-flow)。 |
 | **直连请求诊断** | 内置诊断工具，可查看近期请求、实测延迟/Token 消耗，并提供显式的轻量生成测试。 |
 | **连接 Antigravity IDE** | 可逆的设置适配器、托管代理启动器与浏览器端模型管理器；已在 Windows IDE 2.5.5 上配合本地 OpenAI 兼容服务商验证原生模型选择器与流式对话。[查看配置指南](docs/ide.md)。 |
 | **保持原生模型选择稳定** | 为模型别名和推理强度变体提供持久、无冲突的 ID，并支持明确的[原生选择器容量管理](docs/ide.md#native-model-identities-and-capacity)。 |
@@ -213,7 +213,7 @@ node scripts/deploy.mjs --resources "/path/to/Antigravity/resources"
 
 展开 **Advanced settings**（高级设置）可配置请求限制、推理思考参数、自定义请求头、备用回退模型及其他覆盖选项。各字段定义与导入示例请参阅[配置参考文档](docs/configuration.md)。
 
-如需使用 Google 账号池，请选择 **Google Cloud Code account pool** 并按照[账号池配置指南](docs/configuration.md#google-cloud-code-account-pools)操作。你需要提供自己的桌面端 OAuth 客户端（Desktop OAuth Client）；账号与服务的可用资格仍由官方服务商控制。
+如需使用 Google 账号池，请选择 **Google Cloud Code account pool** 并按照[账号池配置指南](docs/configuration.md#google-cloud-code-account-pools)操作。可通过受识别的 IDE **2.5.5** 安装使用 **Antigravity account** 登录，也可选择 **My Desktop OAuth client** 使用自己的客户端；账号与服务的可用资格仍由服务商控制。
 
 ## 可选网关与 Web 控制台
 

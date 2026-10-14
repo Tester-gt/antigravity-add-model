@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> · <a href="README_zh.md">简体中文</a> · <a href="README_es.md">Español</a>
+  <strong>English</strong> · <a href="README_zh.md">简体中文</a> · <a href="README_es.md">Español</a> · <a href="README_tr.md">Türkçe</a> · <a href="README_ru.md">Русский</a> · <a href="README_hi.md">हिन्दी</a> · <a href="README_ar.md">العربية</a>
 </p>
 
 <p align="center">
@@ -220,7 +220,7 @@ Presets fill in defaults; **API format** determines how requests are translated.
 
 Open **Advanced settings** for request limits, reasoning, headers, fallback models, and other overrides. See the [configuration reference](docs/configuration.md) for field definitions and a sample import.
 
-For Google account pooling, choose **Google Cloud Code account pool** and follow the [account setup guide](docs/configuration.md#google-cloud-code-account-pools). You supply your own Desktop OAuth client; account and service eligibility remain provider-controlled.
+For Google account pooling, choose **Google Cloud Code account pool** and follow the [account setup guide](docs/configuration.md#google-cloud-code-account-pools). Sign in with **Antigravity account** using a recognized IDE **2.5.5** installation, or select **My Desktop OAuth client** to use your own client. Account and service eligibility remain provider-controlled.
 
 ## Optional gateway and web dashboard
 
