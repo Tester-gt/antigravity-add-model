@@ -236,6 +236,33 @@ describe('IDE Cloud Code catalog and picker groups', () => {
     expect(response.agentModelSorts[0].groups[0].displayName).toBe('Group');
     expect(sortedIds(response)).toEqual(['native', ...customIds(response)]);
   });
+  it.each(['none', 'minimal', 'low', 'medium', 'high', 'xhigh'])(
+    'keeps native summarization on the custom model when compaction effort is %s',
+    (compactionReasoningEffort) => {
+      const native = {
+        displayName: 'Native summary model',
+        model: 'MODEL_PLACEHOLDER_M50',
+        modelExperiments: { experiments: { vendorSetting: { boolValue: true } } },
+      };
+      const response = requestModels('/v1internal:fetchAvailableModels', { models: { native } }, undefined, {
+        compactionReasoningEffort,
+      });
+      expect(response.models.native).toEqual(native);
+      for (const id of customIds(response)) {
+        const entry = response.models[id];
+        expect(entry.model).not.toBe(native.model);
+        const checkpointConfig = JSON.parse(
+          entry.modelExperiments.experiments.CASCADE_USE_EXPERIMENT_CHECKPOINTER.stringValue,
+        );
+        // Leave thresholds, fallback behavior and every other native default intact.
+        expect(checkpointConfig).toEqual({ useLastPlannerModel: true });
+      }
+    },
+  );
+  it('preserves the native default summary route when custom compaction effort is inherited', () => {
+    const response = requestModels('/v1internal:fetchAvailableModels', { models: {} });
+    for (const id of customIds(response)) expect(response.models[id]).not.toHaveProperty('modelExperiments');
+  });
   it.each(['error', 'timeout', 'before-headers', 'upstream-error'] as const)(
     'returns configured picker models after %s without inventing native models or credentials',
     (failure) => {

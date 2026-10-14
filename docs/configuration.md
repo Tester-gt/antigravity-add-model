@@ -141,12 +141,20 @@ removes the override. JSON/import users can add these fields to a saved model:
 }
 ```
 
-The desktop/IDE proxy recognizes the continuation-summary template from the
-verified Antigravity IDE **2.5.5** language server in the final user turn. Earlier
+The desktop/IDE proxy recognizes both continuation-summary templates from the
+verified Antigravity IDE **2.5.5** language server, including the session-summary
+template captured during a live automatic checkpoint, in the final user turn. Earlier
 history, tool results, quoted examples and ordinary requests to summarize a
 document keep their normal settings. Other IDE versions or summary templates
 may not match. The override is request-local and follows retries/fallbacks;
 it does not rewrite the saved chat settings or enable compaction itself.
+For IDE 2.5.5, explicitly choosing a compaction effort also advertises a
+per-model native checkpoint setting so summaries use that custom model.
+Leaving the setting inherited preserves the IDE's default summary-model choice.
+Built-in model entries and other custom models are unchanged. Restart the IDE
+after changing this setting and allow its model catalog to refresh; the native
+experiment cache updates asynchronously, so the very first turn can still use
+the previous checkpoint setting.
 Imported gateway routes carry this explicit choice to the gateway, which applies
 it after resolving the provider and avoids starting a second summary of that
 summary request. Update both components when using this route.
@@ -164,6 +172,16 @@ and [Anthropic thinking reference](https://platform.claude.com/docs/en/build-wit
 The optional gateway has its own **Auto Context Compaction → Compaction Reasoning
 Effort** setting for the extra summary requests it creates. Configure that
 separately in the [gateway dashboard](../gateway/README.md#compaction-reasoning-effort).
+
+Live Windows IDE 2.5.5 validation on **2026-10-14** confirmed automatic
+checkpoint generation with a local OpenAI-compatible provider: ordinary requests
+used `xhigh`, the native session summary used `low`, and the next ordinary
+request returned to `xhigh`. The IDE stored the summary without fallback and
+displayed a verification marker that existed only in that summary. The final
+acceptance conversation was created and continued through the IDE UI, without
+injecting a summary prompt or overriding its session configuration through RPC.
+This verifies native routing and request settings; the local provider does not
+measure a remote model's reasoning-token savings or latency.
 
 ## Subagent model selection
 

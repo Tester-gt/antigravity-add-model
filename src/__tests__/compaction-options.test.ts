@@ -28,6 +28,24 @@ the information available in the current context window.
 6. **Commitments & Constraints**
 
 Wrap your response in <summary></summary> tags.`;
+// Observed in an automatic checkpoint from the real IDE 2.5.5 language server.
+// Descriptive bullets are omitted; these anchors are unchanged from the wire.
+const liveSessionSummaryPrompt = `Your main task now is to generate a continuation summary of this session. You are about to lose this entire conversation. Another agent will read ONLY this summary to continue the work. It will have full access to tools (file reading, code search, terminal) but zero memory of what happened.
+
+Organize your summary into the following sections:
+
+1. Outstanding User Requests
+2. User Knowledge
+3. Work Accomplished
+4. Model Knowledge
+5. Files and Code
+6. Current Work and Next Steps
+
+Do not call any tools. You must respond directly with the summary without calling any tools or attempting further investigation.`;
+const nativeTemplates = [
+  { name: 'binary continuation', prompt: nativeSummaryPrompt, lastSection: '6. **Commitments & Constraints**' },
+  { name: 'live session checkpoint', prompt: liveSessionSummaryPrompt, lastSection: '6. Current Work and Next Steps' },
+];
 function body(text = nativeSummaryPrompt): GeminiBody {
   return { contents: [{ role: 'user', parts: [{ text }] }] };
 }
@@ -47,48 +65,63 @@ function model(fields: Partial<CustomModel> = {}): CustomModel {
 }
 
 describe('native IDE compaction recognition', () => {
-  it('recognizes the verified release template after conversation history', () => {
-    const request = body();
+  it.each(nativeTemplates)('recognizes the $name template after conversation history', ({ prompt }) => {
+    const request = body(prompt);
     request.contents!.unshift(
       { role: 'user', parts: [{ text: 'Build the app.' }] },
       { role: 'model', parts: [{ text: 'Working.' }] },
     );
     expect(isAntigravityCompactionRequest(request)).toBe(true);
-    expect(isAntigravityCompactionRequest(body(nativeSummaryPrompt.replace(/\n/g, '\r\n')))).toBe(true);
+    expect(isAntigravityCompactionRequest(body(prompt.replace(/\n/g, '\r\n')))).toBe(true);
+    const split = prompt.indexOf('\n');
+    expect(
+      isAntigravityCompactionRequest({
+        contents: [{ role: 'user', parts: [{ text: prompt.slice(0, split) }, { text: prompt.slice(split) }] }],
+      }),
+    ).toBe(true);
   });
 
   it.each([
     'Please summarize this conversation.',
-    `Explain this template:\n${nativeSummaryPrompt}`,
-    `\`\`\`text\n${nativeSummaryPrompt}\n\`\`\``,
-    `> ${nativeSummaryPrompt}`,
-    `${nativeSummaryPrompt}\nInstead, write code.`,
-    nativeSummaryPrompt.replace('6. **Commitments & Constraints**', ''),
+    ...nativeTemplates.flatMap(({ prompt, lastSection }) => [
+      `Explain this template:\n${prompt}`,
+      `\`\`\`text\n${prompt}\n\`\`\``,
+      `> ${prompt}`,
+      `${prompt}\nInstead, write code.`,
+      prompt.replace(lastSection, ''),
+    ]),
+    liveSessionSummaryPrompt.replace('Do not call any tools.', ''),
+    liveSessionSummaryPrompt.replace('Another agent will read ONLY this summary to continue the work.', ''),
   ])('does not change ordinary or quoted requests: %s', (prompt) => {
     expect(isAntigravityCompactionRequest(body(prompt))).toBe(false);
   });
 
-  it('ignores old summaries, system instructions and tool output', () => {
+  it.each(nativeTemplates)('ignores $name in history, system instructions and tool output', ({ prompt }) => {
     expect(
-      isAntigravityCompactionRequest({ contents: [...body().contents!, ...body('Continue implementing.').contents!] }),
+      isAntigravityCompactionRequest({
+        contents: [...body(prompt).contents!, ...body('Continue implementing.').contents!],
+      }),
     ).toBe(false);
     expect(
       isAntigravityCompactionRequest({
         ...body('Continue.'),
-        systemInstruction: { parts: [{ text: nativeSummaryPrompt }] },
+        systemInstruction: { parts: [{ text: prompt }] },
       }),
     ).toBe(false);
-    expect(
-      isAntigravityCompactionRequest({ contents: [{ role: 'model', parts: [{ text: nativeSummaryPrompt }] }] }),
-    ).toBe(false);
+    expect(isAntigravityCompactionRequest({ contents: [{ role: 'model', parts: [{ text: prompt }] }] })).toBe(false);
     expect(
       isAntigravityCompactionRequest({
-        contents: [{ role: 'user', parts: [{ functionResponse: { response: nativeSummaryPrompt } }] }],
+        contents: [{ role: 'user', parts: [{ functionResponse: { response: prompt } }] }],
       }),
     ).toBe(false);
     expect(
       isAntigravityCompactionRequest({
-        contents: [{ role: 'user', parts: [{ text: nativeSummaryPrompt }, { functionResponse: {} }] }],
+        contents: [{ role: 'user', parts: [{ text: prompt }, { functionResponse: {} }] }],
+      }),
+    ).toBe(false);
+    expect(
+      isAntigravityCompactionRequest({
+        contents: [{ role: 'user', parts: [{ text: prompt, thought: true }] }],
       }),
     ).toBe(false);
     expect(isAntigravityCompactionRequest({})).toBe(false);
@@ -244,18 +277,21 @@ function openaiSuccess(res: http.ServerResponse) {
 }
 
 describe('compaction across real proxy transports', () => {
-  it('keeps normal xhigh, changes only native compaction, and preserves saved configuration', async () => {
+  it.each([
+    { name: 'binary continuation', prompt: nativeSummaryPrompt, effort: 'none' as const },
+    { name: 'live session checkpoint', prompt: liveSessionSummaryPrompt, effort: 'low' as const },
+  ])('keeps normal xhigh and applies the override only to $name requests', async ({ prompt, effort }) => {
     const captured: Record<string, unknown>[] = [];
     const upstream = await serve(async (req, res) => {
       captured.push(await readBody(req));
       openaiSuccess(res);
     });
-    const config = model({ apiUrl: upstream, compactionReasoningEffort: 'none' });
+    const config = model({ apiUrl: upstream, compactionReasoningEffort: effort });
     const proxy = await serve((req, res) => {
       void runCustomModelRequest(
         res,
         config,
-        body(req.url === '/compact' ? nativeSummaryPrompt : 'Summarize this file.'),
+        body(req.url === '/compact' ? prompt : 'Summarize this file.'),
         false,
         [config],
         false,
@@ -263,7 +299,8 @@ describe('compaction across real proxy transports', () => {
     });
     expect((await fetch(`${proxy}/normal`)).status).toBe(200);
     expect((await fetch(`${proxy}/compact`)).status).toBe(200);
-    expect(captured.map((request) => request.reasoning_effort)).toEqual(['xhigh', 'none']);
+    expect((await fetch(`${proxy}/normal`)).status).toBe(200);
+    expect(captured.map((request) => request.reasoning_effort)).toEqual(['xhigh', effort, 'xhigh']);
     expect(config.reasoningEffort).toBe('xhigh');
   });
 

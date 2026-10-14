@@ -158,6 +158,20 @@ function customCloudCodeCatalog(upstream = {}) {
                 model: identity.placeholderId,
                 apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
                 modelProvider: 'MODEL_PROVIDER_GOOGLE',
+                // IDE 2.5.5 otherwise summarizes custom chats with its built-in M50.
+                // Use its per-model checkpoint configuration so the selected custom
+                // model receives the native summary request and its effort override.
+                ...(model.compactionReasoningEffort
+                    ? {
+                        modelExperiments: {
+                            experiments: {
+                                CASCADE_USE_EXPERIMENT_CHECKPOINTER: {
+                                    stringValue: JSON.stringify({ useLastPlannerModel: true }),
+                                },
+                            },
+                        },
+                    }
+                    : {}),
             },
             listEntry: {
                 name: 'models/' + slug,

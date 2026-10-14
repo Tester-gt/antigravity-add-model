@@ -12,7 +12,8 @@ export interface GeminiBody {
     [key: string]: unknown;
 }
 /**
- * Fingerprint from the verified Antigravity IDE 2.5.5 language-server template.
+ * Fingerprints from the verified Antigravity IDE 2.5.5 language-server binary
+ * and its observed live checkpoint request.
  * Only the final plain user turn can trigger it; quoted prompts, history, tool
  * output, and ordinary requests to summarize must retain the normal effort.
  */

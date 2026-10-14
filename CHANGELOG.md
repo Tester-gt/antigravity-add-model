@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Live IDE compaction verification
+
+- Follow up on [issue #20](https://github.com/vahapogut/antigravity-add-model/issues/20) by recognizing the session-summary template captured from a real IDE 2.5.5 automatic checkpoint. Its summary requests previously retained ordinary chat effort.
+- When a custom model explicitly selects a compaction effort, advertise the IDE's per-model checkpoint setting to summarize with that custom model. Inherited settings and built-in model entries keep their existing behavior.
+- Verify the complete flow in the Windows IDE UI with a local OpenAI-compatible provider: normal `xhigh`, automatic summary `low`, successful native checkpoint without fallback, then normal `xhigh` with the summary's private verification marker displayed in the reply. No vendor files or summary prompts were injected. Remote reasoning savings and latency were not measured; see [configuration](docs/configuration.md#compaction-effort).
+
 ### Unreleased — Antigravity account sign-in and project preparation
 
 - Follow up on [issue #19](https://github.com/vahapogut/antigravity-add-model/issues/19) with **Antigravity account** sign-in using the personal-account OAuth profile from a recognized installed IDE 2.5.5 build. Preserve PKCE, state validation, cancellation and the existing custom-client option; unknown installations report an error without fallback.

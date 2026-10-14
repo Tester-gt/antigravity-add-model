@@ -8,7 +8,8 @@ export interface GeminiBody {
 }
 
 /**
- * Fingerprint from the verified Antigravity IDE 2.5.5 language-server template.
+ * Fingerprints from the verified Antigravity IDE 2.5.5 language-server binary
+ * and its observed live checkpoint request.
  * Only the final plain user turn can trigger it; quoted prompts, history, tool
  * output, and ordinary requests to summarize must retain the normal effort.
  */
@@ -22,7 +23,7 @@ export function isAntigravityCompactionRequest(body: GeminiBody): boolean {
     .join('\n')
     .replace(/\s+/g, ' ')
     .trim();
-  return (
+  const legacyTemplate =
     text.startsWith(
       'You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the full conversation history will NOT be available',
     ) &&
@@ -37,8 +38,22 @@ export function isAntigravityCompactionRequest(body: GeminiBody): boolean {
       '5. **Next Steps**',
       '6. **Commitments & Constraints**',
     ].every((section) => text.includes(section)) &&
-    text.endsWith('Wrap your response in <summary></summary> tags.')
-  );
+    text.endsWith('Wrap your response in <summary></summary> tags.');
+  const sessionTemplate =
+    text.startsWith('Your main task now is to generate a continuation summary of this session.') &&
+    text.includes('Another agent will read ONLY this summary to continue the work.') &&
+    [
+      '1. Outstanding User Requests',
+      '2. User Knowledge',
+      '3. Work Accomplished',
+      '4. Model Knowledge',
+      '5. Files and Code',
+      '6. Current Work and Next Steps',
+    ].every((section) => text.includes(section)) &&
+    text.endsWith(
+      'Do not call any tools. You must respond directly with the summary without calling any tools or attempting further investigation.',
+    );
+  return legacyTemplate || sessionTemplate;
 }
 
 type CompactionEffort = NonNullable<CustomModel['compactionReasoningEffort']>;
