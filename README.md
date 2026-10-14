@@ -222,6 +222,8 @@ Open **Advanced settings** for request limits, reasoning, headers, fallback mode
 
 **Compaction reasoning effort** lets recognized IDE context summaries use `low` or `none` while ordinary chat keeps its own effort. The gateway also has a separate summary-effort setting. See [configuration and model support](docs/configuration.md#compaction-effort).
 
+**Compaction threshold (%)** lets you tune the native IDE's checkpoint threshold while reserving space for model output. Leave it blank to keep the IDE default; see the [85k context example](docs/configuration.md#compaction-threshold).
+
 For Google account pooling, choose **Google Cloud Code account pool** and follow the [account setup guide](docs/configuration.md#google-cloud-code-account-pools). Sign in with **Antigravity account** using a recognized IDE **2.5.5** installation, or select **My Desktop OAuth client** to use your own client. Account and service eligibility remain provider-controlled.
 
 ## Optional gateway and web dashboard
@@ -295,6 +297,8 @@ After an Antigravity update, rebuild the addon and run the compatibility check a
 | Check an explicit installation | `npm run patch:check -- --resources "/path/to/Resources"` |
 | Reapply the addon to a supported installation | `npm run doctor:repair -- --resources "/path/to/Resources"` |
 | Restore this installer's backup | `npm run patch:restore -- --resources "/path/to/Resources"` |
+| Inspect a Windows installation before updating | `node scripts/update-preflight.mjs check --resources "C:\path\to\Antigravity\resources" --json` |
+| Restore managed changes and stop the owned proxy before updating | `node scripts/update-preflight.mjs prepare --resources "C:\path\to\Antigravity\resources"` |
 
 Close the app before repair or restore. Use the Windows endpoint option when applicable. Restore refuses to overwrite an installation changed by a later upstream update.
 
@@ -302,6 +306,7 @@ Close the app before repair or restore. Use the Windows endpoint option when app
 | --- | --- |
 | Installer reports `NOT_SUPPORTED` or `UNSUPPORTED_RUNTIME` | Confirm you have the standalone app and check the [supported layouts](docs/compatibility.md). |
 | Black screen after an app update | Follow [startup recovery](docs/compatibility.md#black-screen-after-an-update); avoid restoring an arbitrary older archive. |
+| Windows installer keeps asking to close Antigravity | Follow [update preparation](docs/compatibility.md#windows-installer-asks-to-close-antigravity); collect the exact installer error if it persists. |
 | A model is missing | Check that it is enabled, saved, and using the correct provider model ID. |
 | Provider returns 401, 403, or 404 | Check credentials, account access/location, API URL, and model availability. |
 | Port 50999 is occupied | A binary-patched Windows install needs that fixed port; ordinary unpatched operation can choose another port. |

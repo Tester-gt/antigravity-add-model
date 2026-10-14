@@ -14,6 +14,8 @@ export interface CustomModelConfig {
   maxOutputTokens?: number;
   supportsVision?: boolean;
   supportsThinking?: boolean;
+  compactionReasoningEffort?: string;
+  compactionThresholdPercent?: number;
 }
 
 export interface ModelCapabilities {
@@ -28,6 +30,75 @@ export interface ModelCapabilities {
 export interface ModelNameCapabilities {
   isClaudeThinkingModel: boolean;
   isThinkingModel: boolean;
+}
+
+export interface NativeCheckpointConfig {
+  useLastPlannerModel?: boolean;
+  maxOutputTokens?: number;
+  tokenThreshold?: number;
+  maxTokenLimit?: number;
+}
+
+/** Extra room for the native checkpoint prompt and a final tool result. */
+export const COMPACTION_TOKEN_RESERVE = 1024;
+export const NATIVE_DEFAULT_CHECKPOINT_THRESHOLD = 50_000;
+
+/** Keep the provider's real context/output limits; only change the IDE checkpoint policy. */
+export function nativeCheckpointConfig(model: CustomModelConfig): NativeCheckpointConfig | undefined {
+  const config: NativeCheckpointConfig = {};
+  const cap = detectModelCapabilities(model);
+  // The manager can list old hand-edited files before a save validates them.
+  // Do not turn malformed capability values into an active native override.
+  if (!Number.isSafeInteger(cap.maxTokens) || !Number.isSafeInteger(cap.maxOutputTokens) ||
+      cap.maxOutputTokens <= 0 || cap.maxTokens <= cap.maxOutputTokens) return undefined;
+  if (model.compactionReasoningEffort && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(model.compactionReasoningEffort)) {
+    config.useLastPlannerModel = true;
+    // The native default is an 8192-token summary. Its validator rejects a
+    // checkpoint config if the selected custom model cannot emit that much.
+    config.maxOutputTokens = Math.min(8192, cap.maxOutputTokens);
+  }
+  const percent = model.compactionThresholdPercent;
+  if (percent !== undefined) {
+    const maxTokenLimit = cap.maxTokens - cap.maxOutputTokens - COMPACTION_TOKEN_RESERVE;
+    const tokenThreshold = Math.min(Math.floor(cap.maxTokens * percent / 100), maxTokenLimit);
+    // Validation rejects unusable limits. Older hand-edited files fail closed.
+    if (Number.isSafeInteger(percent) && percent >= 10 && percent <= 90 &&
+        Number.isSafeInteger(model.contextWindow) && Number.isSafeInteger(tokenThreshold) && tokenThreshold >= 1024 &&
+        maxTokenLimit >= NATIVE_DEFAULT_CHECKPOINT_THRESHOLD) {
+      config.maxTokenLimit = maxTokenLimit;
+      // Native IDE independently checks new tokens since the last checkpoint
+      // and total input against these fields. Leaving the old 50k threshold
+      // would still trigger a checkpoint before a larger configured limit.
+      config.tokenThreshold = tokenThreshold;
+    }
+  }
+  return Object.keys(config).length ? config : undefined;
+}
+
+/** Shared by the proxy catalog and the sandbox preload's IPC fallback. */
+export function nativeModelExperiments(model: CustomModelConfig) {
+  const checkpoint = nativeCheckpointConfig(model);
+  return checkpoint
+    ? { experiments: { CASCADE_USE_EXPERIMENT_CHECKPOINTER: { stringValue: JSON.stringify(checkpoint) } } }
+    : undefined;
+}
+
+/**
+ * IDE 2.5.5 validates its 50k threshold / 40k reserve defaults BEFORE reading
+ * the per-model override. Only its catalog needs this compatibility floor.
+ * The default 50k input budget must still fit the real provider before the
+ * experiment cache warms. Saved limits, provider trimming and the override
+ * itself always use detectModelCapabilities() and the real context window.
+ */
+export function nativeCatalogCapabilities(model: CustomModelConfig): ModelCapabilities {
+  const cap = detectModelCapabilities(model);
+  const checkpoint = nativeCheckpointConfig(model);
+  if (checkpoint?.tokenThreshold === undefined ||
+      checkpoint.maxTokenLimit! < NATIVE_DEFAULT_CHECKPOINT_THRESHOLD) return cap;
+  return {
+    ...cap,
+    maxTokens: Math.max(cap.maxTokens, NATIVE_DEFAULT_CHECKPOINT_THRESHOLD + Math.max(40_000, cap.maxOutputTokens)),
+  };
 }
 
 // ─── Detection ────────────────────────────────────────────────────────────

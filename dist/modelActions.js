@@ -37,6 +37,7 @@ exports.createModelActions = createModelActions;
 const diagnostics_1 = require("./diagnostics");
 const path = __importStar(require("node:path"));
 const modelIdentity_1 = require("./modelIdentity");
+const modelUtils_1 = require("./proxy/modelUtils");
 function createModelActions(manager) {
     return {
         'storage:get-custom-models': () => {
@@ -64,11 +65,15 @@ function createModelActions(manager) {
             return models
                 .map((model) => {
                 const identity = byName.get(model.name);
+                const capabilities = (0, modelUtils_1.nativeCatalogCapabilities)(model);
                 return {
                     ...model,
                     nativeCatalogId: identity?.catalogId,
                     nativeModelId: identity?.placeholderId,
                     nativePickerAvailable: !!identity?.placeholderId,
+                    nativeContextWindow: capabilities.maxTokens,
+                    nativeMaxOutputTokens: capabilities.maxOutputTokens,
+                    nativeModelExperiments: (0, modelUtils_1.nativeModelExperiments)(model),
                     nativePickerError: identity?.placeholderId
                         ? undefined
                         : identityError ||

@@ -135,6 +135,62 @@ After an upstream update, run `--check` again and rebuild before redeploying.
 Report a new failure with the desktop/IDE distinction, app version, OS, installer
 output, and first application error. Do not include API keys or auth headers.
 
+## Windows installer asks to close Antigravity
+
+First identify the product: **Antigravity IDE** and the **standalone desktop
+agent** use different installations. The IDE adapter changes its managed user
+setting; the standalone addon changes verified application files. A request to
+close the application alone does not prove that a modified file caused the
+installer failure. See [issue #22](https://github.com/vahapogut/antigravity-add-model/issues/22).
+
+Update this repository, install dependencies if needed, and inspect the exact
+installation you intend to update:
+
+```powershell
+node scripts/update-preflight.mjs check --resources "C:\path\to\Antigravity\resources" --json
+```
+
+This read-only check verifies managed restore data and lists matching Windows
+process IDs, names and executable paths. It also reports other Antigravity
+installations and processes whose executable identity could not be checked.
+It does not inspect every Windows file lock or guarantee that an installer will
+succeed. Close the application and its language server normally. Then prepare
+the same installation:
+
+```powershell
+node scripts/update-preflight.mjs prepare --resources "C:\path\to\Antigravity\resources"
+```
+
+The equivalent npm commands are `npm run update:check -- ...` and
+`npm run update:prepare -- ...`. In PowerShell, use `npm.cmd` or the direct
+`node` commands above if `npm.ps1` consumes the option separator.
+
+For an IDE using a non-default profile, add `--settings "C:\path\to\User\settings.json"`
+to both commands. If the owned proxy uses a custom data directory, also add
+`--data-dir "C:\path\to\proxy-data"`. Use the same paths you supplied to `ide:apply`
+and `ide:launch`; do not select a different profile just to bypass a conflict.
+
+Preparation restores only verified managed changes, stops the authenticated
+owned proxy, and preserves saved models and credentials. It refuses active or
+unverifiable process blockers, changed installations and invalid backups. It
+does not kill processes, disable the updater, run the installer, or overwrite
+a partially updated installation with an old archive. Automatic preparation
+requires Windows process inspection; a failed inspection leaves files alone.
+
+Run the official installer manually after successful preparation. Rebuild and
+recheck compatibility before applying the addon to the new version. If the
+installer still fails, report the product, current/target versions, installer
+filename, installation method, diagnostic output and exact installer error/log.
+Redact personal paths and credentials. The original reported installer hang
+has not yet been reproduced; this recovery command is not proof of its cause.
+
+Live Windows validation on **2026-10-15** used an isolated official IDE 2.5.5
+profile. Inspection identified its running processes; after the IDE was closed,
+preparation restored its managed endpoint setting and stopped the production
+owned proxy. Fixture tests cover standalone ASAR restoration, changed or damaged
+backups, process blockers, and unrelated listeners. The vendor installer itself
+was not run in this validation.
+
 ## Optional Windows language-server endpoint patch
 
 Some standalone Windows builds bypass the configurable API server for model-list

@@ -81,6 +81,26 @@ describe('shared management model identity responses', () => {
     });
   });
 
+  it('returns computed checkpoint metadata to both managers without persisting it', () => {
+    const f = fixture();
+    f.manager.saveModel({
+      ...example, contextWindow: 85000, maxOutputTokens: 8192,
+      compactionReasoningEffort: 'low', compactionThresholdPercent: 80,
+    });
+    const [returned] = f.list();
+    expect(returned).toMatchObject({ contextWindow: 85000, nativeContextWindow: 90000, nativeMaxOutputTokens: 8192 });
+    const experiments = returned.nativeModelExperiments as { experiments: Record<string, { stringValue: string }> };
+    expect(JSON.parse(experiments.experiments.CASCADE_USE_EXPERIMENT_CHECKPOINTER.stringValue)).toEqual({
+      useLastPlannerModel: true, maxOutputTokens: 8192, tokenThreshold: 68000, maxTokenLimit: 75784,
+    });
+    f.actions['storage:save-custom-model'](returned);
+    expect(f.manager.store.read()[0]).not.toHaveProperty('nativeModelExperiments');
+    expect(f.manager.store.read()[0]).toMatchObject({ compactionThresholdPercent: 80, contextWindow: 85000 });
+    expect(f.list()[0].nativeModelExperiments).toEqual(experiments);
+    f.actions['storage:save-custom-model']({ ...returned, compactionThresholdPercent: undefined, compactionReasoningEffort: undefined });
+    expect(f.list()[0].nativeModelExperiments).toBeUndefined();
+  });
+
   it('does not trust or persist identity fields supplied by save and import clients', () => {
     const f = fixture();
     const forged = {
@@ -88,6 +108,9 @@ describe('shared management model identity responses', () => {
       nativeModelId: 'MODEL_PLACEHOLDER_M99999',
       nativePickerAvailable: true,
       nativePickerError: 'forged error',
+      nativeContextWindow: 999999999,
+      nativeMaxOutputTokens: 1,
+      nativeModelExperiments: { experiments: { attacker: { boolValue: true } } },
     };
     f.actions['storage:save-custom-model']({ ...example, ...forged });
     f.actions['storage:import-custom-models']({ models: [{ ...example, name: 'models/imported', ...forged }] });
@@ -96,10 +119,16 @@ describe('shared management model identity responses', () => {
       expect(saved).not.toHaveProperty('nativeModelId');
       expect(saved).not.toHaveProperty('nativePickerAvailable');
       expect(saved).not.toHaveProperty('nativePickerError');
+      expect(saved).not.toHaveProperty('nativeContextWindow');
+      expect(saved).not.toHaveProperty('nativeMaxOutputTokens');
+      expect(saved).not.toHaveProperty('nativeModelExperiments');
     }
     for (const returned of f.list()) {
       expect(returned.nativeCatalogId).not.toBe(forged.nativeCatalogId);
       expect(returned.nativeModelId).not.toBe(forged.nativeModelId);
+      expect(returned.nativeContextWindow).not.toBe(forged.nativeContextWindow);
+      expect(returned.nativeMaxOutputTokens).not.toBe(forged.nativeMaxOutputTokens);
+      expect(returned.nativeModelExperiments).toBeUndefined();
     }
   });
 

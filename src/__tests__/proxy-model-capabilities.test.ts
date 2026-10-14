@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { detectModelCapabilities } from '../proxy/modelUtils';
+import { detectModelCapabilities, nativeCatalogCapabilities, nativeModelExperiments } from '../proxy/modelUtils';
 import { validateCustomModel } from '../schemaValidator';
 import * as modelCatalog from '../proxy/modelCatalog';
 import { runCustomModelRequest } from '../proxy/customRequest';
@@ -92,7 +92,7 @@ function requestModels(
     electron: { app: { getPath: () => '/fixture' } },
     'electron-log': { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     './proxy/shared': {},
-    './proxy/modelUtils': { detectModelCapabilities },
+    './proxy/modelUtils': { detectModelCapabilities, nativeCatalogCapabilities, nativeModelExperiments },
     './proxy/modelCatalog': modelCatalog,
     './proxy/subagentRouting': subagentRoutingModule,
     './proxy/subagentModels': subagentModels,
@@ -178,6 +178,17 @@ describe('custom model vision capability advertisement', () => {
       }
     },
   );
+  it('keeps real context limits in the provider-facing model listing with native compatibility enabled', () => {
+    const response = requestModels('/v1beta/models', { models: [] }, undefined, {
+      provider: 'ollama', externalModelName: 'qwen3.8:27b', contextWindow: 85000,
+      maxOutputTokens: 8192, compactionThresholdPercent: 80,
+    });
+    expect(response.models).toHaveLength(3);
+    for (const entry of response.models) {
+      expect(entry).toMatchObject({ inputTokenLimit: 85000, outputTokenLimit: 8192 });
+      expect(entry).not.toHaveProperty('maxTokens', 90000);
+    }
+  });
 
   it.each([
     { label: 'missing collection', body: { status: 'ok' } },
@@ -254,8 +265,8 @@ describe('IDE Cloud Code catalog and picker groups', () => {
         const checkpointConfig = JSON.parse(
           entry.modelExperiments.experiments.CASCADE_USE_EXPERIMENT_CHECKPOINTER.stringValue,
         );
-        // Leave thresholds, fallback behavior and every other native default intact.
-        expect(checkpointConfig).toEqual({ useLastPlannerModel: true });
+        // Leave thresholds intact and keep the native summary output cap.
+        expect(checkpointConfig).toEqual({ useLastPlannerModel: true, maxOutputTokens: 8192 });
       }
     },
   );
@@ -263,6 +274,23 @@ describe('IDE Cloud Code catalog and picker groups', () => {
     const response = requestModels('/v1internal:fetchAvailableModels', { models: {} });
     for (const id of customIds(response)) expect(response.models[id]).not.toHaveProperty('modelExperiments');
   });
+
+  it.each(['models', 'availableModels', 'available_models'])(
+    'adds the bounded native compatibility floor with a checkpoint policy based on real limits in %s', (key) => {
+      const native = { displayName: 'Native', maxTokens: 128000 };
+      const response = requestModels('/v1internal:fetchAvailableModels', { [key]: { native } }, undefined, {
+        provider: 'ollama', externalModelName: 'qwen3.8:27b', contextWindow: 85000,
+        maxOutputTokens: 8192, compactionThresholdPercent: 80,
+      });
+      expect(response[key].native).toEqual(native);
+      for (const id of customIds(response)) {
+        const entry = response[key][id];
+        expect(entry).toMatchObject({ maxTokens: 90000, maxOutputTokens: 8192 });
+        expect(JSON.parse(entry.modelExperiments.experiments.CASCADE_USE_EXPERIMENT_CHECKPOINTER.stringValue))
+          .toEqual({ tokenThreshold: 68000, maxTokenLimit: 75784 });
+      }
+    },
+  );
   it.each(['error', 'timeout', 'before-headers', 'upstream-error'] as const)(
     'returns configured picker models after %s without inventing native models or credentials',
     (failure) => {

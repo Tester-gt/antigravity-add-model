@@ -3,6 +3,7 @@ import type { createModelManager } from './modelManagement';
 import { getDiagnostics, clearDiagnostics, getRecentModelNames } from './diagnostics';
 import * as path from 'node:path';
 import { allocateModelIdentities } from './modelIdentity';
+import { nativeCatalogCapabilities, nativeModelExperiments, type CustomModelConfig } from './proxy/modelUtils';
 
 export function createModelActions(
   manager: ReturnType<typeof createModelManager>,
@@ -32,11 +33,15 @@ export function createModelActions(
       return models
         .map((model) => {
           const identity = byName.get(model.name);
+          const capabilities = nativeCatalogCapabilities(model as CustomModelConfig);
           return {
             ...model,
             nativeCatalogId: identity?.catalogId,
             nativeModelId: identity?.placeholderId,
             nativePickerAvailable: !!identity?.placeholderId,
+            nativeContextWindow: capabilities.maxTokens,
+            nativeMaxOutputTokens: capabilities.maxOutputTokens,
+            nativeModelExperiments: nativeModelExperiments(model as CustomModelConfig),
             nativePickerError: identity?.placeholderId
               ? undefined
               : identityError ||

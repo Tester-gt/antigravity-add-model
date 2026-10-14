@@ -2,6 +2,14 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Native checkpoint threshold and Windows update preparation
+
+- Address [issue #21](https://github.com/vahapogut/antigravity-add-model/issues/21) with an optional per-model **Compaction threshold (%)**. Preserve actual model capacity, reserve output space, and apply the same validated native settings through the proxy catalog and desktop fallback. Blank settings retain native defaults; see the [85k example](docs/configuration.md#compaction-threshold).
+- Cap native custom-model summary output when the model's advertised output limit is below the IDE's default 8,192 tokens, preventing native checkpoint configuration rejection.
+- Bridge IDE 2.5.5's validation-before-override behavior with a bounded native catalog compatibility value when explicitly configuring a threshold. Keep the saved/provider context and checkpoint policy based on the actual model capacity; reject budgets too small to safely pass native defaults. Explain the displayed compatibility value in the editor and guide.
+- Verify the 85k/8192/50% configuration in Windows IDE 2.5.5 with a local deterministic provider: automatic summary before history trimming, successful native storage without fallback, then a continuation using the stored summary. The UI-created conversation used ordinary native RPC continuations with unchanged configuration; see [validation details](docs/configuration.md#compaction-threshold).
+- Add `update:check` and `update:prepare` for [issue #22](https://github.com/vahapogut/antigravity-add-model/issues/22): inspect Windows process identities and verified restore data, restore managed changes, and stop only the authenticated owned proxy. Refuse stale backups and unresolved process blockers; preserve models and credentials. The original installer hang is still awaiting reproduction details; see [recovery guidance](docs/compatibility.md#windows-installer-asks-to-close-antigravity).
+
 ### Unreleased — Live IDE compaction verification
 
 - Follow up on [issue #20](https://github.com/vahapogut/antigravity-add-model/issues/20) by recognizing the session-summary template captured from a real IDE 2.5.5 automatic checkpoint. Its summary requests previously retained ordinary chat effort.

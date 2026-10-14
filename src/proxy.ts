@@ -30,6 +30,7 @@ export interface CustomModel {
   fallbackModels?: string[];
   reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   compactionReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  compactionThresholdPercent?: number;
   thinkingBudget?: number;
   maxOutputTokens?: number;
   contextWindow?: number;
@@ -106,7 +107,7 @@ import {
 } from './proxy/shared';
 
 // Model configuration & capability detection
-import { detectModelCapabilities } from './proxy/modelUtils';
+import { detectModelCapabilities, nativeCatalogCapabilities, nativeModelExperiments } from './proxy/modelUtils';
 import { CloudCodeRouting } from './proxy/cloudCodeRouting';
 import { catalogModelSlug, catalogDisplayNames, localModelSlug, mergeCloudCodeCatalog } from './proxy/modelCatalog';
 import { allocateModelIdentities, ModelIdentity } from './modelIdentity';
@@ -213,6 +214,8 @@ function customCloudCodeCatalog(upstream: unknown = {}): Record<string, unknown>
         const identity = identities.get(model.name)!;
         const slug = identity.catalogId;
         const cap = detectModelCapabilities(model);
+        const nativeCap = nativeCatalogCapabilities(model);
+        const modelExperiments = nativeModelExperiments(model);
         const capabilities = getAdvertisedModelCapabilities(model);
         return {
           slug,
@@ -220,7 +223,7 @@ function customCloudCodeCatalog(upstream: unknown = {}): Record<string, unknown>
             displayName: labels.get(model.name),
             ...capabilities,
             recommended: true,
-            maxTokens: cap.maxTokens,
+            maxTokens: nativeCap.maxTokens,
             maxOutputTokens: cap.maxOutputTokens,
             tokenizerType: 'LLAMA_WITH_SPECIAL',
             model: identity.placeholderId,
@@ -229,17 +232,7 @@ function customCloudCodeCatalog(upstream: unknown = {}): Record<string, unknown>
             // IDE 2.5.5 otherwise summarizes custom chats with its built-in M50.
             // Use its per-model checkpoint configuration so the selected custom
             // model receives the native summary request and its effort override.
-            ...(model.compactionReasoningEffort
-              ? {
-                  modelExperiments: {
-                    experiments: {
-                      CASCADE_USE_EXPERIMENT_CHECKPOINTER: {
-                        stringValue: JSON.stringify({ useLastPlannerModel: true }),
-                      },
-                    },
-                  },
-                }
-              : {}),
+            ...(modelExperiments ? { modelExperiments } : {}),
           },
           listEntry: {
             name: 'models/' + slug,

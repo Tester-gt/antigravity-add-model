@@ -740,6 +740,12 @@ window.addEventListener('DOMContentLoaded', () => {
             advancedGrid.append(element('p', 'agy-muted', 'Only recognized IDE continuation summaries use this effort. Choose low for faster summaries, or none if your model supports disabling reasoning. Normal chat keeps its settings.'));
             const maxOutput = field(advancedGrid, 'Maximum output tokens', 'agy-max-output', existing?.maxOutputTokens != null ? String(existing.maxOutputTokens) : '', 'number');
             const context = field(advancedGrid, 'Context window (tokens)', 'agy-context-window', existing?.contextWindow != null ? String(existing.contextWindow) : '', 'number');
+            const compactionThreshold = field(advancedGrid, 'IDE compaction threshold (%)', 'agy-compaction-threshold', existing?.compactionThresholdPercent != null ? String(existing.compactionThresholdPercent) : '', 'number');
+            compactionThreshold.min = '10';
+            compactionThreshold.max = '90';
+            compactionThreshold.placeholder = 'IDE default';
+            advancedGrid.append(element('p', 'agy-muted', 'Optional, 10–90% of the actual context window in new tokens since the previous checkpoint. Native counts may differ from provider totals. With many tools, start at 50%; higher values can trim older history before a full checkpoint. Leave blank for IDE defaults. The threshold is capped to reserve the model output limit plus 1,024 tokens. Set accurate context and output limits, then fully quit and reopen the IDE; the model cache may take an additional turn to refresh.'));
+            advancedGrid.append(element('p', 'agy-muted', 'IDE 2.5.5 needs at least 50,000 input tokens after those reserves. Its native picker may show a compatibility context, for example 90,000 for a real 85,000-token model. Your saved context and provider limit remain 85,000 in that example, and the custom checkpoint policy uses that real limit.'));
             const timeout = field(advancedGrid, 'Request timeout (milliseconds)', 'agy-timeout', existing?.timeout != null ? String(existing.timeout) : '', 'number');
             const retries = field(advancedGrid, 'Maximum retries (0–5)', 'agy-max-retries', existing?.maxRetries != null ? String(existing.maxRetries) : '', 'number');
             retries.max = '5';
@@ -836,6 +842,11 @@ window.addEventListener('DOMContentLoaded', () => {
                 const maxRetries = readNumber(retries, 'Maximum retries');
                 if (maxRetries != null && maxRetries > 5)
                     throw new Error('Maximum retries cannot exceed 5.');
+                const compactionThresholdPercent = readNumber(compactionThreshold, 'IDE compaction threshold', 10);
+                if (compactionThresholdPercent != null && compactionThresholdPercent > 90)
+                    throw new Error('IDE compaction threshold cannot exceed 90%.');
+                if (compactionThresholdPercent != null && !context.value.trim())
+                    throw new Error('Set the actual context window before configuring the IDE compaction threshold.');
                 const customHeaders = readJson(headers, 'Custom headers');
                 if (customHeaders && Object.values(customHeaders).some((value) => typeof value !== 'string'))
                     throw new Error('Custom header values must be strings.');
@@ -862,6 +873,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         : undefined,
                     reasoningEffort: effort.value || undefined,
                     compactionReasoningEffort: compactionEffort.value || undefined,
+                    compactionThresholdPercent,
                     thinkingBudget: readNumber(thinking, 'Thinking budget'),
                     maxOutputTokens: readNumber(maxOutput, 'Maximum output tokens', 1),
                     contextWindow: readNumber(context, 'Context window', 1),
@@ -1330,9 +1342,11 @@ window.addEventListener('DOMContentLoaded', () => {
             usedLabels.add(displayName);
             modelsObj[slug] = {
                 displayName, recommended: true,
-                maxTokens: model.contextWindow || 1048576, maxOutputTokens: model.maxOutputTokens || 4096,
+                maxTokens: model.nativeContextWindow || model.contextWindow || 1048576,
+                maxOutputTokens: model.nativeMaxOutputTokens || model.maxOutputTokens || 4096,
                 tokenizerType: 'LLAMA_WITH_SPECIAL', model: placeholder,
                 apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', modelProvider: 'MODEL_PROVIDER_GOOGLE',
+                ...(authoritative && model.nativeModelExperiments ? { modelExperiments: model.nativeModelExperiments } : {}),
             };
             changed = true;
         }

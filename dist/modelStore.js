@@ -186,6 +186,9 @@ class ModelStore {
         delete model.nativeModelId;
         delete model.nativePickerAvailable;
         delete model.nativePickerError;
+        delete model.nativeContextWindow;
+        delete model.nativeMaxOutputTokens;
+        delete model.nativeModelExperiments;
         if (!model.name?.startsWith('models/'))
             model.name = `models/${model.name || ''}`;
         if (model.name === 'models/')

@@ -355,6 +355,20 @@ function verifyBackup(resources, state) {
     fail('BACKUP_INVALID', `The saved original backup failed its SHA-256 check: ${backup}`);
   return backup;
 }
+/** Read-only update recovery inspection; does not require a compiled addon. */
+export function inspectForUpdate(options = {}) {
+  const resources = resolveResources(options.resources, options.platform, options.env);
+  if (exists(path.join(resources, 'app', 'out'))) unsupported();
+  for (const filename of Object.values(locations(resources))) assertNoLinks(resources, filename);
+  const info = inspectArchive(locations(resources).archive);
+  const state = readState(resources);
+  const current = fingerprint(resources);
+  if (state && !equal(state.patched, current)) {
+    fail('RESTORE_REFUSED', 'This installation changed after patching, possibly during an update. Do not restore an older backup over it.');
+  }
+  if (state) verifyBackup(resources, state);
+  return { resources, version: info.version, status: state ? 'managed' : 'unmanaged' };
+}
 export async function packPreservingUnpacked(source, candidate, originalEntries) {
   const original = new Map(originalEntries.map(({ name, entry }) => [name, entry]));
   const streams = walk(source).map(({ name, stat }) => {

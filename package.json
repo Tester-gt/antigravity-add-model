@@ -29,6 +29,8 @@
     "gateway": "node scripts/gateway.mjs",
     "doctor": "node scripts/doctor.mjs",
     "doctor:repair": "node scripts/deploy.mjs",
+    "update:check": "node scripts/update-preflight.mjs check",
+    "update:prepare": "node scripts/update-preflight.mjs prepare",
     "ide:check": "node scripts/ide.mjs check",
     "ide:apply": "node scripts/ide.mjs apply",
     "ide:restore": "node scripts/ide.mjs restore",

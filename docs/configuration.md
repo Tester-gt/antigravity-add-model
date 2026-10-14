@@ -99,6 +99,7 @@ are supported in configuration but do not have a separate editor control.
 | `enabled` | Defaults to enabled; disabled models stay saved but leave the custom picker and fallback chain. |
 | `reasoningEffort` | Optional `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`; sent for the OpenAI format when configured. Model support varies. |
 | `compactionReasoningEffort` | Optional `none`, `minimal`, `low`, `medium`, `high`, or `xhigh` for recognized IDE continuation summaries only. Omit to keep normal model settings. See [compaction effort](#compaction-effort). |
+| `compactionThresholdPercent` | Optional integer `10`–`90` for the native IDE checkpoint threshold. Requires an explicit, accurate `contextWindow`; blank inherits IDE behavior. See [compaction threshold](#compaction-threshold). |
 | `thinkingBudget` | Nonnegative token budget for supported Google/Anthropic requests. For Anthropic, `0` disables thinking; otherwise use at least `1024` and less than the output limit. |
 | `maxOutputTokens`, `contextWindow` | Positive token limits. If both exist, output must be smaller than context. Limits cannot enlarge the upstream model's capacity. |
 | `timeout` | Per-attempt timeout in milliseconds; default `120000`. |
@@ -125,6 +126,79 @@ for worked examples, retry timing and the separate MCP delegation behavior.
 Old DeepSeek, Kimi, Fireworks, LM Studio, and llama.cpp entries without
 `apiFormat` retain their historical Anthropic format. Select the intended format
 explicitly when migrating a configuration.
+
+## Compaction threshold
+
+In **Advanced settings → Compaction threshold (%)**, set when the native IDE
+should consider summarizing new context. Leaving it blank preserves the IDE's
+default. Start at **50%** when many tools are enabled, then check context usage
+before raising it. For example, a local server actually configured for an
+85,000-token context and an 8,192-token output limit can use:
+
+```json
+{
+  "contextWindow": 85000,
+  "maxOutputTokens": 8192,
+  "compactionThresholdPercent": 50
+}
+```
+
+IDE 2.5.5 normally reserves at least 40,000 tokens for checkpoint processing;
+an 85,000-token model therefore gets a default input cap of 45,000. This is
+below its 50,000-token trigger, so initial checkpoint validation can fail.
+The override keeps the real model capacity and reserves the configured output
+limit plus 1,024 tokens instead. In the example, the checkpoint threshold is
+**42,500 new tokens** and its input cap is **75,784**. The editor rejects an
+unusable threshold and configurations that cannot safely pass the IDE's initial
+50,000-token checkpoint budget.
+
+IDE 2.5.5 validates its defaults before reading per-model overrides. For this
+85k example, those defaults are invalid (50,000 trigger / 45,000 input cap).
+When this explicit threshold setting is enabled, the native catalog therefore
+uses a **90,000-token compatibility value** to pass that startup validation.
+Saved configuration, provider requests and the checkpoint calculation still
+use the real **85,000-token** limit. The IDE may display the larger compatibility
+value; it is not extra provider capacity. This bridge is enabled only when the
+real context minus output and 1,024 tokens leaves at least 50,000 tokens, so the
+temporary native defaults also fit. Smaller budgets need an upstream IDE fix
+and are rejected for this option instead of silently overstating their capacity.
+
+The threshold applies to the IDE's count of new tokens since its previous
+checkpoint, checked between steps. Its count includes native conversation
+components and can differ from your provider's total context display. Large
+single responses can cross the threshold before the next check. Fixed system
+instructions and tool definitions also consume the input cap without counting
+toward this new-token trigger in the same way. A high percentage can therefore
+make the IDE trim older history **before a full checkpoint is created**. Lower
+the percentage if this happens; even 50% is a starting point, not a guarantee
+for every tool set or conversation.
+
+For an advanced comparison, **80%** with the same 85,000 context and 8,192 output
+limit targets 68,000 new tokens while retaining the 75,784 input cap. With a
+16,384 output limit, both values are capped at 67,592. Use higher percentages
+only after checking the remaining room for system instructions, tools and the
+next response. This setting does not promise an exact provider counter value,
+increase a model's capacity, or change the gateway's separate compaction settings.
+
+Set **Compaction reasoning effort** separately if you also want the custom model
+to create native summaries. A threshold alone keeps the IDE's existing summary
+model choice. Restart the IDE and let the model catalog refresh after changing
+either setting; its native experiment cache can update after the first turn.
+Support is verified against IDE 2.5.5; other versions may handle these settings
+differently.
+
+Live Windows IDE 2.5.5 verification on **2026-10-15** used the 85k/8192/50%
+configuration with a local deterministic OpenAI-compatible provider. The IDE
+accepted the configuration, created a successful custom-model summary before
+history trimming, and later used that summary in a normal response. Native
+state confirmed a 42,500 new-token trigger and 75,784 input cap; the summary used
+`low` effort and ordinary requests used `xhigh`. The conversation was created
+in the UI and continued through ordinary native RPC messages with its resolved
+configuration unchanged; no summary prompt or checkpoint override was injected.
+Responses were 18,000 characters each (about 6,000 tokens by the native estimate).
+This verifies the native workflow, not Ollama's tokenizer or a remote provider's
+billing. Fully quit and reopen the IDE after changing the percentage: reloading
+only its language server retained the previous experiment setting during testing.
 
 ## Compaction effort
 

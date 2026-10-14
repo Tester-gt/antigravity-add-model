@@ -6,6 +6,7 @@ import { applyRequestOptions, type GeminiBody, isAntigravityCompactionRequest } 
 import { runCustomModelRequest, stopCustomRequests } from '../proxy/customRequest';
 import { stopCleanupInterval } from '../proxy/shared';
 import { validateCustomModel } from '../schemaValidator';
+import { nativeCatalogCapabilities } from '../proxy/modelUtils';
 
 vi.mock('electron-log', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
@@ -277,6 +278,36 @@ function openaiSuccess(res: http.ServerResponse) {
 }
 
 describe('compaction across real proxy transports', () => {
+  it('trims provider requests to the real 85k context even when the native catalog needs a 90k compatibility floor', async () => {
+    const captured: Record<string, unknown>[] = [];
+    const upstream = await serve(async (req, res) => {
+      captured.push(await readBody(req));
+      openaiSuccess(res);
+    });
+    const config = model({
+      apiUrl: upstream, contextWindow: 85000, maxOutputTokens: 8192, compactionThresholdPercent: 80,
+    });
+    expect(nativeCatalogCapabilities(config).maxTokens).toBe(90000);
+    const request: GeminiBody = {
+      contents: [
+        // About 79k estimated input tokens: fits the compatibility context's
+        // budget, but not the real provider's 85000 - 8192 token input limit.
+        { role: 'user', parts: [{ text: 'OLD_TURN_'.repeat(26334) }] },
+        { role: 'model', parts: [{ text: 'Old response.' }] },
+        { role: 'user', parts: [{ text: 'CURRENT_TURN_KEEP' }] },
+      ],
+    };
+    const proxy = await serve((_req, res) => {
+      void runCustomModelRequest(res, config, request, false, [config], false);
+    });
+    expect((await fetch(proxy)).status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(JSON.stringify(captured[0].messages)).toContain('CURRENT_TURN_KEEP');
+    expect(JSON.stringify(captured[0].messages)).not.toContain('OLD_TURN_');
+    expect(config.contextWindow).toBe(85000);
+    expect(request.contents).toHaveLength(3);
+  });
+
   it.each([
     { name: 'binary continuation', prompt: nativeSummaryPrompt, effort: 'none' as const },
     { name: 'live session checkpoint', prompt: liveSessionSummaryPrompt, effort: 'low' as const },

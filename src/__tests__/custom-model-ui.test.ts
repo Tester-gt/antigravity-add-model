@@ -378,6 +378,47 @@ describe('custom model settings in the preserved vendor preload', () => {
     expect(f.input('agy-thinking-budget').value).toBe('8192');
   });
 
+  it('round-trips the optional native compaction threshold without changing model limits or effort', async () => {
+    const f = await fixture(undefined, [{
+      ...model, contextWindow: 85000, maxOutputTokens: 8192,
+      reasoningEffort: 'xhigh', compactionReasoningEffort: 'low',
+    }]);
+    await f.click('Edit');
+    expect(f.input('agy-compaction-threshold').value).toBe('');
+    expect(f.input('agy-compaction-threshold').min).toBe('10');
+    expect(f.input('agy-compaction-threshold').max).toBe('90');
+    f.input('agy-compaction-threshold', '80');
+    await f.click('Save model');
+    expect(f.getModels()[0]).toMatchObject({
+      compactionThresholdPercent: 80, contextWindow: 85000, maxOutputTokens: 8192,
+      reasoningEffort: 'xhigh', compactionReasoningEffort: 'low',
+    });
+    await f.click('Edit');
+    expect(f.input('agy-compaction-threshold').value).toBe('80');
+    f.input('agy-compaction-threshold', '');
+    await f.click('Save model');
+    expect(f.getModels()[0].compactionThresholdPercent).toBeUndefined();
+    expect(f.getModels()[0]).toMatchObject({ contextWindow: 85000, maxOutputTokens: 8192, compactionReasoningEffort: 'low' });
+  });
+
+  it.each(['9', '91', '50.5'])('rejects out-of-range or fractional native compaction thresholds: %s', async (value) => {
+    const f = await fixture(undefined, [{ ...model, contextWindow: 85000, maxOutputTokens: 8192 }]);
+    await f.click('Edit');
+    f.input('agy-compaction-threshold', value);
+    await f.click('Save model');
+    expect(f.invoke.mock.calls.filter(([channel]) => channel === 'storage:save-custom-model')).toHaveLength(0);
+    expect(f.document.querySelector('[role="dialog"]')!.textContent).toMatch(/IDE compaction threshold (?:must|cannot)/);
+  });
+
+  it('requires the real context window before saving a native threshold', async () => {
+    const f = await fixture();
+    await f.click('Edit');
+    f.input('agy-compaction-threshold', '80');
+    await f.click('Save model');
+    expect(f.invoke.mock.calls.filter(([channel]) => channel === 'storage:save-custom-model')).toHaveLength(0);
+    expect(f.document.querySelector('[role="dialog"]')!.textContent).toContain('Set the actual context window');
+  });
+
   it('offers adaptive account selection without changing an existing strategy', async () => {
     const f = await fixture(undefined, [
       { ...model, provider: 'google-cloudcode', googlePool: { strategy: 'quota' }, googleAccounts: [] },

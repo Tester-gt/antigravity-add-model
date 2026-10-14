@@ -12,6 +12,7 @@
  */
 
 import { PROVIDERS, workersAiAccountPath } from './providers';
+import { COMPACTION_TOKEN_RESERVE, NATIVE_DEFAULT_CHECKPOINT_THRESHOLD, detectModelCapabilities } from './proxy/modelUtils';
 
 interface ValidationResult {
   valid: boolean;
@@ -161,6 +162,25 @@ export function validateCustomModel(model: unknown): ValidationResult {
   }
   if (m.contextWindow !== undefined && m.maxOutputTokens !== undefined && Number(m.maxOutputTokens) >= Number(m.contextWindow)) {
     return { valid: false, error: 'maxOutputTokens must be smaller than contextWindow' };
+  }
+  if (m.compactionThresholdPercent !== undefined) {
+    if (!Number.isSafeInteger(m.compactionThresholdPercent) || Number(m.compactionThresholdPercent) < 10 || Number(m.compactionThresholdPercent) > 90) {
+      return { valid: false, error: 'compactionThresholdPercent must be an integer from 10 to 90' };
+    }
+    if (m.contextWindow === undefined) {
+      return { valid: false, error: 'Set the actual contextWindow before configuring compactionThresholdPercent' };
+    }
+    const cap = detectModelCapabilities(m as unknown as Parameters<typeof detectModelCapabilities>[0]);
+    if (cap.maxTokens - cap.maxOutputTokens - COMPACTION_TOKEN_RESERVE < NATIVE_DEFAULT_CHECKPOINT_THRESHOLD) {
+      return { valid: false, error: 'IDE 2.5.5 requires at least 50000 input tokens after reserving the real model output limit and 1024 extra tokens before it can apply a custom compaction threshold; use the actual provider limits or leave the threshold unset' };
+    }
+    const threshold = Math.min(
+      Math.floor(cap.maxTokens * Number(m.compactionThresholdPercent) / 100),
+      cap.maxTokens - cap.maxOutputTokens - COMPACTION_TOKEN_RESERVE,
+    );
+    if (threshold < 1024) {
+      return { valid: false, error: 'Compaction needs at least 1024 input tokens after reserving the model output limit and 1024 extra tokens; increase contextWindow or lower maxOutputTokens to the actual provider limit' };
+    }
   }
   if (m.fallbackModels !== undefined && (!Array.isArray(m.fallbackModels) || m.fallbackModels.length > 20 || m.fallbackModels.some((value) => typeof value !== 'string' || !value.trim()))) {
     return { valid: false, error: 'fallbackModels must contain up to 20 saved model names' };

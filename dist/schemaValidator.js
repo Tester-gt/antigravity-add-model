@@ -21,6 +21,7 @@ exports.validateGenerateContentRequest = validateGenerateContentRequest;
 exports.validateOpenAiChunk = validateOpenAiChunk;
 exports.validateAnthropicEvent = validateAnthropicEvent;
 const providers_1 = require("./providers");
+const modelUtils_1 = require("./proxy/modelUtils");
 /**
  * Validates a Gemini candidate object structure.
  */
@@ -158,6 +159,22 @@ function validateCustomModel(model) {
     }
     if (m.contextWindow !== undefined && m.maxOutputTokens !== undefined && Number(m.maxOutputTokens) >= Number(m.contextWindow)) {
         return { valid: false, error: 'maxOutputTokens must be smaller than contextWindow' };
+    }
+    if (m.compactionThresholdPercent !== undefined) {
+        if (!Number.isSafeInteger(m.compactionThresholdPercent) || Number(m.compactionThresholdPercent) < 10 || Number(m.compactionThresholdPercent) > 90) {
+            return { valid: false, error: 'compactionThresholdPercent must be an integer from 10 to 90' };
+        }
+        if (m.contextWindow === undefined) {
+            return { valid: false, error: 'Set the actual contextWindow before configuring compactionThresholdPercent' };
+        }
+        const cap = (0, modelUtils_1.detectModelCapabilities)(m);
+        if (cap.maxTokens - cap.maxOutputTokens - modelUtils_1.COMPACTION_TOKEN_RESERVE < modelUtils_1.NATIVE_DEFAULT_CHECKPOINT_THRESHOLD) {
+            return { valid: false, error: 'IDE 2.5.5 requires at least 50000 input tokens after reserving the real model output limit and 1024 extra tokens before it can apply a custom compaction threshold; use the actual provider limits or leave the threshold unset' };
+        }
+        const threshold = Math.min(Math.floor(cap.maxTokens * Number(m.compactionThresholdPercent) / 100), cap.maxTokens - cap.maxOutputTokens - modelUtils_1.COMPACTION_TOKEN_RESERVE);
+        if (threshold < 1024) {
+            return { valid: false, error: 'Compaction needs at least 1024 input tokens after reserving the model output limit and 1024 extra tokens; increase contextWindow or lower maxOutputTokens to the actual provider limit' };
+        }
     }
     if (m.fallbackModels !== undefined && (!Array.isArray(m.fallbackModels) || m.fallbackModels.length > 20 || m.fallbackModels.some((value) => typeof value !== 'string' || !value.trim()))) {
         return { valid: false, error: 'fallbackModels must contain up to 20 saved model names' };

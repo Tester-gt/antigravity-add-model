@@ -258,6 +258,32 @@ describe('preload model-response compatibility', () => {
     expect(result.models['custom-assigned-id'].model).toBe('MODEL_PLACEHOLDER_M640');
   });
 
+  it.each(['fetch', 'xhr'])('preserves calculated checkpoint policy and real model limits in %s fallback', async (transport) => {
+    const nativeModelExperiments = {
+      experiments: { CASCADE_USE_EXPERIMENT_CHECKPOINTER: { stringValue: JSON.stringify({
+        useLastPlannerModel: true, maxOutputTokens: 8192, maxTokenLimit: 75784, tokenThreshold: 68000,
+      }) } },
+    };
+    const fixture = createFixture(new Response('{"models":{}}', { headers: { 'content-type': 'application/json' } }), [{
+      ...customModel, nativeCatalogId: 'custom-threshold', nativeModelId: 'MODEL_PLACEHOLDER_M640',
+      nativePickerAvailable: true, contextWindow: 85000, nativeContextWindow: 90000, nativeMaxOutputTokens: 8192,
+      nativeModelExperiments,
+    }]);
+    let result: any;
+    if (transport === 'fetch') result = await (await fixture.window.fetch(modelsUrl)).json();
+    else {
+      const xhr = new fixture.TestXHR();
+      xhr.open('GET', modelsUrl);
+      xhr.send();
+      await new Promise((resolve) => setImmediate(resolve));
+      xhr.complete();
+      result = JSON.parse(xhr.responseText);
+    }
+    expect(result.models['custom-threshold']).toMatchObject({
+      maxTokens: 90000, maxOutputTokens: 8192, modelExperiments: nativeModelExperiments,
+    });
+  });
+
   it('does not invent a shared legacy alias for older IPC effort variants', async () => {
     const original = new Response('{"models":{}}', { headers: { 'content-type': 'application/json' } });
     const fixture = createFixture(original, [customModel, { ...customModel, name: 'another-effort' }]);

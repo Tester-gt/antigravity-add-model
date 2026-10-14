@@ -22,6 +22,7 @@ export interface CustomModel {
     fallbackModels?: string[];
     reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
     compactionReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+    compactionThresholdPercent?: number;
     thinkingBudget?: number;
     maxOutputTokens?: number;
     contextWindow?: number;
