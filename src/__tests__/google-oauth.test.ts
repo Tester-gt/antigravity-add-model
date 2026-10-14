@@ -1,10 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import * as http from 'node:http';
+import * as https from 'node:https';
 import { loginGoogleAccount, GOOGLE_AUTHORIZATION_URL, GOOGLE_TOKEN_URL } from '../googleOAuth';
 
 const clientId = 'unit-test-client.apps.googleusercontent.com';
 const tokenResponse = { access_token: 'test-access', refresh_token: 'test-refresh', expires_in: 120 };
+vi.mock('node:https', () => ({ request: vi.fn() }));
+const tokenServers: http.Server[] = [];
+afterEach(async () => {
+  vi.mocked(https.request).mockReset();
+  for (const server of tokenServers) server.closeAllConnections();
+  await Promise.all(
+    tokenServers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
+});
+
 function request(url: string, method = 'GET'): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(url, { method, agent: false }, (res) => {
@@ -43,6 +54,48 @@ function callback(authorization: URL, params: Record<string, string> = {}): stri
 }
 
 describe('explicit Google desktop OAuth', () => {
+  it.each([
+    [403, /OAuth client, consent\/test users/],
+    [429, /rate or quota limit/],
+    [503, /temporarily unavailable/],
+  ] as const)(
+    'explains HTTP %s from the real token-exchange path without echoing provider content',
+    async (status, guidance) => {
+      const server = http.createServer((_req, res) => {
+        res.writeHead(status);
+        res.end('<html>test-client-secret test-code test-access test-refresh</html>');
+      });
+      tokenServers.push(server);
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address() as { port: number };
+      vi.mocked(https.request).mockImplementation(((
+        target: string,
+        options: http.RequestOptions,
+        receive: (response: http.IncomingMessage) => void,
+      ) => {
+        expect(target).toBe(GOOGLE_TOKEN_URL);
+        return http.request(`http://127.0.0.1:${port}/token`, options, receive);
+      }) as typeof https.request);
+      let opened!: (url: URL) => void;
+      const authorization = new Promise<URL>((resolve) => {
+        opened = resolve;
+      });
+      const result = loginGoogleAccount({ clientId, clientSecret: 'test-client-secret' }, async (url) => {
+        opened(new URL(url));
+      }).catch((error: Error) => error);
+      const response = await request(callback(await authorization));
+      expect(response.status).toBe(502);
+      const failure = await result;
+      expect(failure).toBeInstanceOf(Error);
+      expect(String(failure)).toMatch(guidance);
+      expect(String(failure)).toContain(`HTTP ${status}`);
+      expect(`${response.body} ${String(failure)}`).not.toMatch(
+        /test-client-secret|test-code|test-access|test-refresh/,
+      );
+      expect(https.request).toHaveBeenCalledOnce();
+    },
+  );
+
   it('uses official endpoints, a random loopback port, state and PKCE without exposing tokens to the browser', async () => {
     const attempt = makeAttempt({ clientId, clientSecret: 'test-client-secret', label: 'Personal' });
     const auth = await attempt.authorization;

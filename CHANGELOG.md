@@ -2,6 +2,13 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Local proxy security and provider onboarding
+
+- Address the security findings in [issue #17](https://github.com/vahapogut/antigravity-add-model/issues/17): validate Host/Origin on desktop and IDE proxy routes while preserving native localhost calls; bind desktop model-list forwarding to the current owned language server; restrict authenticated non-image downloads to Google API HTTPS hosts without following redirects. Keep the IDE service isolated from desktop LS origins.
+- Send credential-store diagnostics directly through the persisted logger using fixed messages without raw exceptions. Add an installer regression confirming that source maps and unrelated build files stay outside the addon. Add a [Spanish getting-started guide](README_es.md).
+- Add the optional [Workers AI setup wizard](docs/workers-ai-setup.md) suggested in [issue #18](https://github.com/vahapogut/antigravity-add-model/issues/18): use an existing token or explicitly create an account-scoped expiring token, discover/select models, encrypt saved credentials and rotate only the chosen account's entries. Read-only verification checks catalog access; setup never runs generation or creates token managers.
+- Improve [Google account-pool guidance](docs/configuration.md#google-cloud-code-account-pools) for [issue #19](https://github.com/vahapogut/antigravity-add-model/issues/19), distinguish access denial, rate limits and service unavailability without exposing provider error bodies, and make account tests use the saved model endpoint. Multiple accounts and rotation remain supported; native Antigravity login is separate and is not imported into this pool.
+
 ### Unreleased — Fallback configuration guide
 
 - Address [issue #16](https://github.com/vahapogut/antigravity-add-model/issues/16) with [fallback-chain examples](docs/providers.md#fallback-chains-for-rate-limited-providers) for parallel agent workloads, dated Workers AI limits and the Unified billing requirement for the higher paid-model limit.

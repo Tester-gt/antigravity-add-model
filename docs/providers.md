@@ -63,6 +63,11 @@ for older DeepSeek and Fireworks entries.
 
 ## Cloudflare Workers AI
 
+For guided setup from the repository, use `npm run workers-ai:setup -- wizard`.
+The optional [setup helper](workers-ai-setup.md) can create a scoped token or use
+an existing one, select models and save credentials through the encrypted model
+store. The manual editor flow remains available:
+
 1. Select **Cloudflare Workers AI** in the desktop model editor.
 2. Replace `ACCOUNT_ID` in the API URL with your Cloudflare account's 32-character
    ID. The full chat URL is

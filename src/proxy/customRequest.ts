@@ -6,6 +6,7 @@ import type { CustomModel } from '../proxy';
 import { resolveApiFormat } from '../providers';
 import { acquireGoogleAccount, GoogleAccountError, GoogleAccountLease } from '../googleAccounts';
 import { classifyGoogleRateLimit, type GoogleRateLimitDecision } from '../googlePoolPolicy';
+import { describeGoogleAccessError } from '../googleAccessErrors';
 import { beginDiagnosticRequest } from '../diagnostics';
 import * as registry from './registry';
 import { CircuitBreaker } from './circuitBreaker';
@@ -388,7 +389,7 @@ export async function runCustomModelRequest(
             const hint = status === 400 || status === 422 ? toolSchemaErrorHint(errorBody) : '';
             upstream.destroy();
             throw new UpstreamError(
-              `Upstream returned HTTP ${status}.${hint}`,
+              `${cloudCode ? describeGoogleAccessError(status).message : `Upstream returned HTTP ${status}.`}${hint}`,
               status,
               status === 408 || status === 429 || status >= 500,
               retryAfter,

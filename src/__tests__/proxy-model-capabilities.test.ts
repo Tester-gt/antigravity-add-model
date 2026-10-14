@@ -1,3 +1,4 @@
+import * as loopbackSecurity from '../proxy/loopbackSecurity';
 import * as subagentRoutingModule from '../proxy/subagentRouting';
 import * as subagentModels from '../proxy/subagentModels';
 import * as nativeSubagentResponse from '../proxy/nativeSubagentResponse';
@@ -105,6 +106,7 @@ function requestModels(
     './modelStore': { readModelConfig: () => models },
     './cryptoStore': { decryptModels: (value: unknown) => value },
     './schemaValidator': { validateCustomModel },
+    './proxy/loopbackSecurity': loopbackSecurity,
     './proxy/listen': {},
   };
   const module = { exports: {} as { handleRequest: http.RequestListener } };

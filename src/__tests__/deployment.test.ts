@@ -113,6 +113,8 @@ describe('standalone deployment with real ASAR fixtures', () => {
 
   it('adds hooks while preserving current vendor APIs, dependencies, and every unpacked file', async () => {
     const f = await fixture();
+    put(path.join(f.dist, 'desktop.js.map'), '{"sources":["desktop.ts"]}');
+    put(path.join(f.dist, 'unrelated-debug-file.js'), '// must not be shipped');
     const original = fingerprint(f.resources);
     await deploy(f);
     expect(readArchive(f.resources, 'dist/main.js')).toContain('// original 2.0.1');
@@ -121,6 +123,11 @@ describe('standalone deployment with real ASAR fixtures', () => {
     expect(readArchive(f.resources, 'dist/ipcHandlers.js')).toBe('// vendor WSL and IPC handlers\n');
     expect(readArchive(f.resources, 'dist/utils.js')).toBe('// vendor window and certificate settings\n');
     expect(readArchive(f.resources, 'dist/modelPatch/desktop.js')).toBe('// patch desktop.js\n');
+    const installedFiles = asar.listPackage(path.join(f.resources, 'app.asar'));
+    expect(
+      installedFiles.some((file) => file.replace(/\\/g, '/').startsWith('/dist/modelPatch/') && file.endsWith('.map')),
+    ).toBe(false);
+    expect(installedFiles.some((file) => file.endsWith('unrelated-debug-file.js'))).toBe(false);
     expect(readArchive(f.resources, 'dist/vendor-only.js')).toBe('// vendor 2.0.1\n');
     expect(readArchive(f.resources, 'node_modules/vendor/index.js')).toBe('// vendor dependency\n');
     expect(JSON.parse(readArchive(f.resources, 'package.json')).vendorField).toBe('retain me');

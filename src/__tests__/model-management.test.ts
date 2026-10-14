@@ -188,6 +188,25 @@ describe('model storage and compatibility', () => {
     await expect(manager.testModel(listed)).resolves.toMatchObject({ success: true });
   });
 
+  it('tests account quota at the saved model endpoint instead of the default endpoint', async () => {
+    const { manager } = setup();
+    let requests = 0;
+    const endpoint = await server(async (req, res) => {
+      requests++;
+      expect(req.url).toBe('/v1internal:retrieveUserQuotaSummary');
+      expect(req.headers.authorization).toBe('Bearer quota-fixture-access');
+      res.end(JSON.stringify({ buckets: [{ bucketId: 'fixture', remainingFraction: 0.75 }] }));
+    });
+    manager.saveModel({
+      ...googleEntry,
+      apiUrl: endpoint,
+      googleAccounts: [{ id: 'quota-endpoint', accessToken: 'quota-fixture-access', expiresAt: Date.now() + 3600000 }],
+    });
+    const result = await manager.googleTestAccount({ modelName: googleEntry.name, accountId: 'quota-endpoint' });
+    expect(requests).toBe(1);
+    expect(result.quota.buckets).toEqual([{ id: 'fixture', remainingFraction: 0.75, resetTime: undefined }]);
+  });
+
   it('does not let a stale refresh overwrite credentials edited while a test was in flight', async () => {
     const { directory } = setup();
     let finish!: (account: GoogleAccount) => void;

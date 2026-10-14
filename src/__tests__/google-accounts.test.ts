@@ -8,6 +8,7 @@ import {
   getGooglePoolStatus,
   refreshGoogleAccount,
   resetGoogleAccountState,
+  type GooglePoolOptions,
   type GoogleAccount,
 } from '../googleAccounts';
 
@@ -37,6 +38,26 @@ function account(id: string): GoogleAccount {
 }
 
 describe('Google OAuth with user-provided app credentials', () => {
+  it.each([
+    [403, 'access-denied', /OAuth client, consent\/test users/],
+    [429, 'rate-limited', /rate or quota limit/],
+    [503, 'transient', /temporarily unavailable/],
+  ] as const)(
+    'preserves HTTP %s during token refresh without exposing upstream error pages',
+    async (status, category, guidance) => {
+      const endpoint = await serve((_req, res) => {
+        res.writeHead(status, { 'Content-Type': 'text/html' });
+        res.end('<html>private-client-secret refresh-token echoed-upstream-request</html>');
+      });
+      const failure = await refreshGoogleAccount(
+        { id: 'failed-refresh', clientId: 'owned-client', refreshToken: 'refresh-token' },
+        endpoint,
+      ).catch((error: Error) => error);
+      expect(failure).toMatchObject({ status, category, message: expect.stringMatching(guidance) });
+      expect(String(failure)).not.toMatch(/private-client-secret|refresh-token|echoed-upstream-request|invalid JSON/);
+    },
+  );
+
   it('refreshes expired tokens once, coalesces simultaneous refreshes and persists rotated credentials through the injected callback', async () => {
     let calls = 0;
     let params: URLSearchParams;
@@ -108,6 +129,73 @@ describe('Google OAuth with user-provided app credentials', () => {
 });
 
 describe('Google account selection and quota', () => {
+  it.each([
+    [401, 'authentication', /Reconnect this account/],
+    [403, 'access-denied', /account\/project permissions and service eligibility/],
+    [429, 'rate-limited', /rate or quota limit/],
+    [503, 'transient', /temporarily unavailable/],
+  ] as const)(
+    'preserves HTTP %s for quota and model discovery with safe, actionable guidance',
+    async (status, category, guidance) => {
+      let responseBody = '<html>private-token private-project private-email@example.com</html>';
+      const endpoint = await serve((_req, res) => {
+        res.writeHead(status);
+        res.end(responseBody);
+      });
+      for (const body of [responseBody, JSON.stringify({ error: { message: responseBody } })]) {
+        responseBody = body;
+        for (const operation of [fetchGoogleQuota, fetchGoogleModels]) {
+          const failure = await operation(account('diagnostic'), endpoint).catch((error: Error) => error);
+          expect(failure).toMatchObject({ status, category, message: expect.stringMatching(guidance) });
+          expect(String(failure)).not.toMatch(/private-token|private-project|private-email|invalid JSON/);
+        }
+      }
+    },
+  );
+
+  it('still rejects malformed successful account responses instead of inventing quota', async () => {
+    const endpoint = await serve((_req, res) => res.end('not-json'));
+    await expect(fetchGoogleQuota(account('malformed'), endpoint)).rejects.toMatchObject({
+      status: 502,
+      message: 'Google account service returned invalid JSON.',
+    });
+  });
+
+  it.each<NonNullable<GooglePoolOptions['strategy']>>(['round-robin', 'least-loaded', 'quota', 'adaptive'])(
+    'supports 50 accounts with %s and keeps access failures separate from transient cooldowns',
+    async (strategy) => {
+      const accounts = Array.from({ length: 50 }, (_, index) => account(`pool-${index}`));
+      const leases = [];
+      for (let index = 0; index < accounts.length; index++)
+        leases.push(await acquireGoogleAccount('models/test', accounts, { strategy, maxConcurrency: 1 }));
+      expect(new Set(leases.map((lease) => lease.account.id)).size).toBe(50);
+      await expect(acquireGoogleAccount('models/test', accounts, { strategy, maxConcurrency: 1 })).rejects.toThrow(
+        /concurrency/,
+      );
+      leases[0].release({ status: 403 });
+      leases[1].release({ status: 429 });
+      leases[2].release({ status: 503 });
+      for (const lease of leases.slice(3)) lease.release({ status: 200 });
+      const next = await acquireGoogleAccount('models/test', accounts, { strategy, maxConcurrency: 1 });
+      expect(leases.slice(0, 3).map((lease) => lease.account.id)).not.toContain(next.account.id);
+      next.release({ status: 200 });
+      const statuses = getGooglePoolStatus();
+      expect(statuses.find((state) => state.id === leases[0].account.id)).toMatchObject({
+        status: 'forbidden',
+        lastError: { category: 'access-denied' },
+      });
+      expect(statuses.find((state) => state.id === leases[1].account.id)).toMatchObject({
+        status: 'cooldown',
+        lastError: { category: 'rate-limited' },
+      });
+      expect(statuses.find((state) => state.id === leases[2].account.id)).toMatchObject({
+        status: 'cooldown',
+        lastError: { category: 'transient' },
+      });
+      expect(JSON.stringify(statuses)).not.toContain('access-pool');
+    },
+  );
+
   it('discovers authenticated Cloud Code models with the account project and returns only IDs and labels', async () => {
     const endpoint = await serve(async (req, res) => {
       expect(req.url).toBe('/v1internal:fetchAvailableModels');

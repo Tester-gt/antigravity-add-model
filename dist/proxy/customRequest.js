@@ -44,6 +44,7 @@ const string_decoder_1 = require("string_decoder");
 const providers_1 = require("../providers");
 const googleAccounts_1 = require("../googleAccounts");
 const googlePoolPolicy_1 = require("../googlePoolPolicy");
+const googleAccessErrors_1 = require("../googleAccessErrors");
 const diagnostics_1 = require("../diagnostics");
 const registry = __importStar(require("./registry"));
 const circuitBreaker_1 = require("./circuitBreaker");
@@ -387,7 +388,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                         const retryAfter = decision?.retryAfterMs ?? (0, requestOptions_1.parseRetryAfter)(upstream.headers['retry-after']);
                         const hint = status === 400 || status === 422 ? toolSchemaErrorHint(errorBody) : '';
                         upstream.destroy();
-                        throw new UpstreamError(`Upstream returned HTTP ${status}.${hint}`, status, status === 408 || status === 429 || status >= 500, retryAfter, status !== 400 && status !== 422, decision);
+                        throw new UpstreamError(`${cloudCode ? (0, googleAccessErrors_1.describeGoogleAccessError)(status).message : `Upstream returned HTTP ${status}.`}${hint}`, status, status === 408 || status === 429 || status >= 500, retryAfter, status !== 400 && status !== 422, decision);
                     }
                     if (isStream && String(upstream.headers['content-type']).includes('text/event-stream')) {
                         const decoder = new string_decoder_1.StringDecoder('utf8');

@@ -46,7 +46,6 @@ export async function startStandaloneService(
 ): Promise<{ port: number; stop: () => Promise<void> }> {
   if (!/^[a-f0-9]{64}$/.test(options.token) || !/^[a-f0-9-]{36}$/.test(options.instance))
     throw new Error('Invalid service identity');
-  const endpoint = `http://127.0.0.1:${options.port}`;
   codec.configureCredentialDirectory(options.dataDirectory);
   const manager = createModelManager(options.dataDirectory, codec, openBrowser);
   const stop = async () => {
@@ -62,11 +61,7 @@ export async function startStandaloneService(
     res.end(JSON.stringify(value));
   };
   const handleManagement = (req: http.IncomingMessage, res: http.ServerResponse): boolean => {
-    // Guard generation too: browser requests can spend credentials even without reading responses.
-    if (req.headers.host !== `127.0.0.1:${options.port}` || (req.headers.origin && req.headers.origin !== endpoint)) {
-      respond(res, 403, { error: 'Service is available only at its loopback origin' });
-      return true;
-    }
+    // startProxy guards every route (including generation) before this handler.
     if (!(req.url || '').startsWith('/_addon')) return false;
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -154,6 +149,7 @@ export async function startStandaloneService(
     return true;
   };
   const port = await startProxy({
+    allowLanguageServerRouting: false,
     port: options.port,
     dataDirectory: options.dataDirectory,
     handleManagement,

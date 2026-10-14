@@ -1,3 +1,4 @@
+import * as loopbackSecurity from '../proxy/loopbackSecurity';
 import * as subagentRoutingModule from '../proxy/subagentRouting';
 import * as subagentModels from '../proxy/subagentModels';
 import * as nativeSubagentResponse from '../proxy/nativeSubagentResponse';
@@ -94,6 +95,7 @@ function fixture(fixed = true) {
     './modelStore': {},
     './cryptoStore': {},
     // These are the production marker parser and listener, with only the socket mocked.
+    './proxy/loopbackSecurity': loopbackSecurity,
     './proxy/listen': { getRequiredProxyPort, listenProxy },
   };
   const module = { exports: {} as ProxyModule };
@@ -127,7 +129,7 @@ describe('proxy lifecycle across language-server restarts', () => {
     const rawRequest = (target: string) =>
       new Promise<string>((resolve, reject) => {
         const socket = net.connect(port, '127.0.0.1', () => {
-          socket.write(`GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+          socket.write(`GET ${target} HTTP/1.1\r\nHost: localhost:${port}\r\nConnection: close\r\n\r\n`);
         });
         let response = '';
         socket.setEncoding('utf8');

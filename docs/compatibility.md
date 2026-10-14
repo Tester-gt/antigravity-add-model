@@ -168,3 +168,34 @@ An endpoint without a model-list API may still support generation; configure it
 manually if necessary. A successful listing does not prove that model generation
 will work or that the account has sufficient quota. For Google Cloud Code, the
 account editor also offers an explicit authorization/quota check.
+
+## Local proxy trust boundary
+
+Both the desktop proxy and the IDE service bind to loopback and validate the
+request's Host and browser Origin before routing. Native callers can use
+`localhost:<proxy-port>` or `127.0.0.1:<proxy-port>` without an Origin header.
+Browser callers must use the proxy's own local origin; the standalone desktop
+also permits its registered, currently running language-server origin. Other
+origins, including `null`, are rejected. The IDE service does not inherit the
+desktop language-server exception. A port change invalidates the old LS origin.
+
+Desktop `GetAvailableModels` forwarding accepts only the app's active local
+language-server port and known model-list RPC paths. The self-signed TLS
+exception is restricted to that target. The caller cannot choose another
+remote service or a different local port through `?ls=`.
+
+Incoming Google authorization is attached to non-image file downloads only for
+HTTPS `googleapis.com` or its subdomains on the default HTTPS port. Redirects
+are not followed. Image inputs keep their existing credential-free handling.
+
+These checks protect the local service from foreign browser origins; they are
+not authentication of every process on the same computer. Local native callers
+remain trusted. IDE management and MCP endpoints additionally require the owned
+service token. Use the [authenticated gateway](../gateway/README.md#remote-access)
+for remote access rather than exposing the local proxy.
+
+Credential-store diagnostics use `electron-log` directly, including in the
+addon loaded by the preserved vendor runtime. Failures use fixed messages and
+omit raw exceptions, tokens and ciphertext. The standalone installer copies
+only the runtime JavaScript allowlist into the addon directory; repository
+source maps and unrelated build files are not packaged into the addon.

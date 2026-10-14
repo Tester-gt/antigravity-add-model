@@ -39,6 +39,7 @@ exports.loginGoogleAccount = loginGoogleAccount;
 const http = __importStar(require("node:http"));
 const https = __importStar(require("node:https"));
 const node_crypto_1 = require("node:crypto");
+const googleAccessErrors_1 = require("./googleAccessErrors");
 exports.GOOGLE_AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 exports.GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPES = 'https://www.googleapis.com/auth/cloud-platform';
@@ -87,7 +88,7 @@ function exchangeToken(parameters, signal) {
             res.on('error', () => finish(new Error('Google token exchange failed')));
             res.on('end', () => {
                 if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                    finish(new Error(`Google token exchange failed (HTTP ${res.statusCode || 0}). Check your OAuth client configuration.`));
+                    finish(new Error((0, googleAccessErrors_1.describeGoogleAccessError)(res.statusCode || 502, 'oauth').message));
                     return;
                 }
                 try {

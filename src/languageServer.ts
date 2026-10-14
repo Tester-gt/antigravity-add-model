@@ -8,7 +8,7 @@ import { PassThrough } from 'stream';
 import { getLsLogPath, getAppDataDirName, getActivePortFilePath } from './paths';
 import { LS_CERT_FINGERPRINT } from './constants';
 import { setupNodeWrapper } from './utils';
-import { startProxy, stopProxy } from './proxy';
+import { setLanguageServerPortResolver, startProxy, stopProxy } from './proxy';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -106,9 +106,10 @@ export function getLsPort(): number {
   return _lsPort;
 }
 
-/** Clears the language server process reference (call after killing it). */
+/** Clears the language server process and trusted port (call after killing it). */
 export function clearLsProcess(): void {
   _lsProcess = null;
+  _lsPort = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,10 +180,12 @@ function setupNodeModules(env: Record<string, string | undefined>, modules: Node
  */
 export function startLanguageServer(port: number, csrf: string, headless?: boolean): Promise<LanguageServerHandle> {
   return new Promise(async (resolve, reject) => {
+    _lsPort = 0;
     const logStream = fs.createWriteStream(getLsLogPath(), { flags: 'w' });
 
     let proxyPort: number;
     try {
+      setLanguageServerPortResolver(getLsPort);
       proxyPort = await startProxy();
     } catch (err) {
       console.error('[LanguageServer] Failed to start local proxy:', err);
@@ -238,21 +241,22 @@ export function startLanguageServer(port: number, csrf: string, headless?: boole
         relativePath: ['build', 'src', 'bin', 'chrome-devtools-mcp.js'],
       },
     ]);
-    _lsProcess = spawn(LS_BINARY, args, {
+    const child = spawn(LS_BINARY, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: env as Record<string, string>,
     });
+    _lsProcess = child;
     if (!headless) {
       // Close stdin immediately — the LS may block waiting for metadata on stdin.
-      _lsProcess.stdin?.end();
+      child.stdin?.end();
     }
     const combined = new PassThrough();
-    _lsProcess.stdout?.pipe(combined, { end: false });
-    _lsProcess.stderr?.pipe(combined, { end: false });
+    child.stdout?.pipe(combined, { end: false });
+    child.stderr?.pipe(combined, { end: false });
     // Buffer stderr for crash log extraction (ring buffer)
     const stderrChunks: string[] = [];
     let stderrLength = 0;
-    _lsProcess.stderr?.on('data', (data) => {
+    child.stderr?.on('data', (data) => {
       const str = data.toString();
       stderrChunks.push(str);
       stderrLength += str.length;
@@ -285,10 +289,10 @@ export function startLanguageServer(port: number, csrf: string, headless?: boole
           resolved = true;
           clearTimeout(timer);
           const actualPort = parseInt(m[1], 10);
-          _lsPort = actualPort;
+          if (_lsProcess === child) _lsPort = actualPort;
           resolve({
             port: actualPort,
-            process: _lsProcess!,
+            process: child,
             exitPromise,
           });
         }
@@ -305,7 +309,8 @@ export function startLanguageServer(port: number, csrf: string, headless?: boole
     // Exit promise — resolves whenever the process exits (whether during
     // startup or after). Includes crash stack trace extraction.
     const exitPromise = new Promise<ExitInfo>((exitResolve) => {
-      _lsProcess!.on('exit', (code, signal) => {
+      child.on('exit', (code, signal) => {
+        if (_lsProcess === child) clearLsProcess();
         if (!logStreamEnded) {
           logStreamEnded = true;
           logStream.end();
@@ -355,8 +360,10 @@ function monitorLsCrashInternal(
   options: StartMonitorOptions,
 ): void {
   void handle.exitPromise.then(async (exitInfo) => {
-    clearLsProcess();
-    if (_intentionalTermination) {
+    // A late exit from an older child must not clear or restart its replacement.
+    if (_lsProcess && _lsProcess !== handle.process) return;
+    if (_lsProcess === handle.process) clearLsProcess();
+    if (_intentionalTermination || _lsProcess) {
       return;
     }
     const { code, signal, crashStackTrace } = exitInfo;
@@ -380,7 +387,7 @@ function monitorLsCrashInternal(
     _restartCount++;
     console.log(`Attempting restart ${_restartCount}/${MAX_RESTARTS} in ${RESTART_COOLDOWN_MS / 1000}s...`);
     await sleep(RESTART_COOLDOWN_MS);
-    if (_intentionalTermination) {
+    if (_intentionalTermination || _lsProcess) {
       return;
     }
     try {
@@ -426,7 +433,7 @@ export async function killLanguageServer(): Promise<void> {
         // Process already dead or exited
       }
     }
-    clearLsProcess();
+    if (_lsProcess === proc) clearLsProcess();
   }
 }
 

@@ -39,6 +39,7 @@
     "proxy:stop": "node scripts/desktop-service.mjs stop",
     "proxy:status": "node scripts/desktop-service.mjs status",
     "model:mcp": "node scripts/model-delegation-mcp.mjs",
+    "workers-ai:setup": "node scripts/workers-ai.mjs",
     "patch:check": "node scripts/deploy.mjs --check",
     "patch:restore": "node scripts/deploy.mjs --restore",
     "test:integration": "node scripts/integration-smoke.mjs"

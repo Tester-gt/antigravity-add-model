@@ -41,6 +41,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.setLanguageServerPortResolver = setLanguageServerPortResolver;
 exports.loadCustomModels = loadCustomModels;
 exports.startProxy = startProxy;
 exports.stopProxy = stopProxy;
@@ -71,7 +72,24 @@ const modelStore_1 = require("./modelStore");
 const listen_1 = require("./proxy/listen");
 const subagentRouting_1 = require("./proxy/subagentRouting");
 const subagentModels_1 = require("./proxy/subagentModels");
+const loopbackSecurity_1 = require("./proxy/loopbackSecurity");
 const nativeSubagentResponse_1 = require("./proxy/nativeSubagentResponse");
+let languageServerPortResolver;
+let languageServerRoutingEnabled = false;
+/** Registered by the desktop with its own live language-server port getter. */
+function setLanguageServerPortResolver(resolve) {
+    languageServerPortResolver = resolve;
+}
+function currentLanguageServerPort() {
+    if (!languageServerRoutingEnabled)
+        return undefined;
+    try {
+        return languageServerPortResolver?.();
+    }
+    catch {
+        return undefined;
+    }
+}
 // Dynamic imports (stays require for Electron-specific modules)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const cryptoStore = require('./cryptoStore');
@@ -534,7 +552,7 @@ async function resolveFileData(body, reqHeaders) {
                     if (fs.existsSync(fp))
                         fileContent = fs.readFileSync(fp, 'utf-8');
                 }
-                else if (authHeader && uri.startsWith('https://')) {
+                else if (authHeader && (0, loopbackSecurity_1.authenticatedGoogleFileUrl)(uri)) {
                     fileContent = await downloadFileContent(uri, authHeader);
                 }
                 if (fileContent) {
@@ -549,8 +567,12 @@ async function resolveFileData(body, reqHeaders) {
 }
 function downloadFileContent(url, authHeader) {
     return new Promise((resolve, reject) => {
-        const u = new URL(url);
-        (u.protocol === 'https:' ? https : http)
+        const u = (0, loopbackSecurity_1.authenticatedGoogleFileUrl)(url);
+        if (!u) {
+            reject(new Error('Authenticated file downloads require a Google API HTTPS URL'));
+            return;
+        }
+        https
             .request({
             hostname: u.hostname,
             path: u.pathname + u.search,
@@ -721,15 +743,10 @@ function encodeModelEntryForGetModels(name, displayName, mapping) {
 }
 // ─── GetAvailableModels Proxy Handler ───────────────────────────────────────
 function handleGetAvailableModelsProxy(res, reqBody, lsUrl) {
-    let lsParsed;
-    try {
-        lsParsed = new URL(lsUrl);
-        if (!['http:', 'https:'].includes(lsParsed.protocol))
-            throw new Error('Invalid protocol');
-    }
-    catch {
+    const lsParsed = (0, loopbackSecurity_1.languageServerModelsUrl)(lsUrl, currentLanguageServerPort());
+    if (!lsParsed) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'Invalid language server URL' } }));
+        res.end(JSON.stringify({ error: { message: 'URL must target the active local language server model-list endpoint' } }));
         return;
     }
     const client = lsParsed.protocol === 'https:' ? https : http;
@@ -743,6 +760,8 @@ function handleGetAvailableModelsProxy(res, reqBody, lsUrl) {
             Accept: 'application/grpc-web+proto',
             'Content-Length': String(reqBody.length),
         },
+        // The app's own loopback language server uses a self-signed certificate.
+        // This exception is reachable only after matching its trusted port and RPC path.
         rejectUnauthorized: false,
     };
     const lsReq = client.request(options, (lsRes) => {
@@ -1180,10 +1199,13 @@ async function startProxy(options = {}) {
         throw new Error('Proxy port must be an integer between 1 and 65535');
     }
     serviceDataDirectory = options.dataDirectory ? path.resolve(options.dataDirectory) : undefined;
+    languageServerRoutingEnabled = options.allowLanguageServerRouting !== false;
     shutdownGraceMs = options.shutdownGraceMs;
     cloudCodeRouting = options.ideCloudCodeRouting ? new cloudCodeRouting_1.CloudCodeRouting() : undefined;
     const requiredPort = options.port ?? (0, listen_1.getRequiredProxyPort)(require('electron').app.getAppPath());
     const newServer = http.createServer((req, res) => {
+        if (!(0, loopbackSecurity_1.guardLoopbackRequest)(req, res, currentLanguageServerPort()))
+            return;
         if (!options.handleManagement?.(req, res))
             handleRequest(req, res);
     });

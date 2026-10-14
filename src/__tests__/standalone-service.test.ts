@@ -146,6 +146,13 @@ describe('owned Node proxy and management HTTP', () => {
     }
     expect(upstreamCalls).toHaveLength(count);
   });
+  it('accepts localhost at the actual service port without weakening management authentication', async () => {
+    const headers = { Host: `localhost:${options.port}`, Origin: `http://localhost:${options.port}` };
+    expect((await request(options.port, '/_addon/', { headers })).status).toBe(200);
+    expect((await request(options.port, '/_addon/health', { headers })).status).toBe(401);
+    expect((await request(options.port, '/_addon/health', { headers: { ...headers, Authorization: `Bearer ${token}` } })).status).toBe(200);
+    expect((await request(options.port, '/health', { headers: { Host: `localhost:${options.port + 1}` } })).status).toBe(403);
+  });
   it('validates management JSON, route, media type and action names', async () => {
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
     expect((await request(options.port, '/_addon/rpc', { method: 'POST', headers, body: '{bad}' })).status).toBe(400);

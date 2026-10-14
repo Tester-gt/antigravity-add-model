@@ -12,6 +12,7 @@ async function fixture(proxyPort = 50999, lsPort = 54321) {
   let intercept: (details: { url: string }, callback: ReturnType<typeof vi.fn>) => void;
   const register = vi.fn();
   const stop = vi.fn().mockResolvedValue(undefined);
+  const setLanguageServerPortResolver = vi.fn();
   const showErrorBox = vi.fn();
   const exported: { install?: (getPort: () => number) => void } = {};
   const dependencies = {
@@ -21,7 +22,7 @@ async function fixture(proxyPort = 50999, lsPort = 54321) {
       dialog: { showErrorBox },
     },
     './customIpc': { registerCustomModelHandlers: register },
-    './proxy': { getProxyPort: () => proxyPort, stopProxy: stop },
+    './proxy': { getProxyPort: () => proxyPort, stopProxy: stop, setLanguageServerPortResolver },
   };
   runInNewContext(compiled, { exports: exported, require: (name) => dependencies[name], URL, console });
   exported.install!(() => lsPort);
@@ -31,6 +32,7 @@ async function fixture(proxyPort = 50999, lsPort = 54321) {
     events,
     register,
     stop,
+    setLanguageServerPortResolver,
     showErrorBox,
     request(url: string) {
       const callback = vi.fn();
@@ -47,6 +49,8 @@ describe('additive desktop integration', () => {
   it('registers only once, redirects local model lists and leaves generation to the LS', async () => {
     const f = await fixture();
     expect(f.register).toHaveBeenCalledTimes(1);
+    expect(f.setLanguageServerPortResolver).toHaveBeenCalledTimes(1);
+    expect(f.setLanguageServerPortResolver.mock.calls[0][0]()).toBe(54321);
     const url = `https://127.0.0.1:54321${route}GetAvailableModels`;
     expect(f.request(url)).toEqual({
       redirectURL: `http://127.0.0.1:50999/GetAvailableModels?ls=${encodeURIComponent(url)}`,

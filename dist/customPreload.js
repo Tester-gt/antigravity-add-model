@@ -229,7 +229,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const panel = element('details');
         panel.open = true;
         panel.append(element('summary', '', 'Google accounts'));
-        panel.append(element('p', 'agy-muted', 'Add accounts you own using your Desktop OAuth client or a credential file. Save the model to retain changes. Existing secrets stay masked.'));
+        panel.append(element('p', 'agy-muted', 'Add up to 50 accounts you own using your Desktop OAuth client or a credential file. This pool is separate from Antigravity’s built-in Google sign-in. Save the model to retain changes. Existing secrets stay masked.'));
         const list = element('div');
         list.id = 'agy-google-accounts-list';
         const editor = element('div');
@@ -334,7 +334,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }, status));
         const login = element('details');
         login.append(element('summary', '', 'Sign in with your OAuth client'));
-        login.append(element('p', 'agy-muted', 'Enter a Desktop OAuth client from your Google Cloud project. The browser opens only when you choose Sign in. Your project and account must be eligible for Cloud Code.'));
+        login.append(element('p', 'agy-muted', 'Enter a Desktop OAuth client from your Google Cloud project. Repeat Sign in with Google for each account, then save the model. Your project and account must have access to the configured Cloud Code service; native Antigravity access does not grant that access.'));
         const loginLabel = field(login, 'Account label', 'agy-google-login-label');
         const loginClient = field(login, 'Desktop OAuth client ID', 'agy-google-login-client-id');
         const loginSecret = field(login, 'OAuth client secret (if required)', 'agy-google-login-client-secret', '', 'password');
@@ -360,7 +360,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     throw new Error('Google login did not return an account.');
                 addAccount(result.account);
                 loginSecret.value = '';
-                setStatus(status, 'Account authorized. Save the model within 10 minutes to retain it; otherwise sign in again.');
+                setStatus(status, 'Account authorized. Save the model within 10 minutes to retain it; otherwise sign in again. Use Test account to check service access and quota.');
             }
             finally {
                 if (cancelModalOperation === cancel)

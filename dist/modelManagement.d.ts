@@ -82,6 +82,10 @@ export declare function createModelManager(directory: string, codec: SecretCodec
             failed: number;
             avgLatencyMs: number;
             lastStatus: number;
+            lastError: {
+                category: import("./googleAccessErrors").GoogleAccessErrorCategory;
+                message: string;
+            };
             quotaAgeMs: number;
             quotaFresh: boolean;
             quotaExhausted: boolean;

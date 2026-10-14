@@ -193,10 +193,13 @@ for setup, network listeners, tunnels, and the gateway's separate configuration.
 Choose **Google Cloud Code account pool** and enter an available model ID. Add
 an account before using **Fetch provider models**; discovery uses an enabled
 account. The pool is separate from the application's vendor-managed sign-in.
+Multi-account selection and automatic switching are already supported. This
+provider requires your own OAuth client or explicitly imported credentials; it
+does not sign into or switch the IDE's native Google session.
 
 1. Create your own Google OAuth client with application type **Desktop app** and configure consent/test users for your project. Enter its client ID and optional client secret under **Sign in with your OAuth client**.
 2. Click **Sign in with Google**. This explicitly opens the browser using Google's [installed-app OAuth flow](https://developers.google.com/identity/protocols/oauth2/native-app), with PKCE, state validation, and a temporary loopback callback. The requested scope is `cloud-platform`. You can cancel; the login attempt times out after two minutes.
-3. Save the model within **10 minutes**. Pending credentials remain in main-process memory until saved; the renderer receives masked fields. Repeat sign-in if an unsaved entry expires.
+3. Repeat **Sign in with Google** for each account you want to add, then save the model within **10 minutes**. Pending credentials remain in main-process memory until saved; the renderer receives masked fields. Repeat sign-in if an unsaved entry expires.
 4. Alternatively, use **Import account credentials** for your own `authorized_user` JSON, an account object, or an array. Import itself makes no network requests. Save the model to retain the credentials encrypted.
 5. Use **Test account** to check authorization and retrieve a quota snapshot. **Pool status** shows current state. Quota refresh is explicit, not periodic.
 
@@ -228,6 +231,35 @@ No third-party OAuth client credentials are bundled, and no browser/IDE/gcloud
 credentials are automatically extracted. Successful OAuth does not grant Cloud
 Code entitlement, model access, or quota. Supply an eligible account/project;
 Google's location and service-access decisions remain in effect.
+
+### Native sign-in and account access errors
+
+Native Antigravity sign-in remains in the [IDE's own setup](ide.md#check-configure-and-launch).
+There is no client-free native sign-in integration in this account pool. As of
+**2026-10-14**, the official [Antigravity CLI authentication guide](https://antigravity.google/docs/cli/install)
+describes the CLI's own account sessions, while the [SDK guide](https://antigravity.google/docs/sdk/overview)
+documents Gemini API keys and Google Cloud credentials. Neither guide documents
+an OAuth client/grant for this proxy to reuse native consumer sign-in.
+
+Google also documents that [consumer access to the former Gemini Code Assist and Gemini CLI ended on June 18, 2026](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals).
+The remaining [Code Assist service requires Standard or Enterprise access](https://docs.cloud.google.com/gemini/docs/codeassist/troubleshoot).
+This is distinct from [Antigravity's individual plans](https://antigravity.google/pricing).
+A successful OAuth exchange alone does not establish eligibility for either service.
+
+| Result | Meaning and next step |
+| --- | --- |
+| **401** | Authorization was rejected. Reconnect the account with its OAuth client. |
+| **403** | Access was denied. Check the endpoint, account/project permissions, enabled services and eligibility. During OAuth, also check consent/test-user settings. A 403 alone does not prove an Enterprise subscription is required. |
+| **429** | A rate or quota limit was reached. The pool respects the provider's retry/reset hints and can try another eligible configured account before output starts. |
+| **503** | The provider is temporarily unavailable or overloaded. Retry later; another account may encounter the same provider-wide demand. This is not evidence of invalid credentials or exhausted personal quota. |
+
+See [Google's error reference](https://ai.google.dev/gemini-api/docs/api-errors).
+**Pool status** distinguishes access failures from transient cooldowns. Account
+tests and discovery retain the HTTP status even if the provider returns an HTML
+error page; provider error bodies are not echoed into diagnostics. If access
+still fails, include the application version, selected provider, endpoint host/path
+and the safe error message in an issue. Omit URL queries, account identifiers,
+API keys, tokens, OAuth client secrets and authorization headers.
 
 ## Effort variants and recent models
 

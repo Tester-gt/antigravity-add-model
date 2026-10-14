@@ -45,11 +45,15 @@ export interface ProxyStartOptions {
     dataDirectory?: string;
     /** Addon-owned HTTP management routes. Return true when handled. */
     handleManagement?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
+    /** IDE service has no owned desktop LS; never reuse desktop routing/origin exceptions. */
+    allowLanguageServerRouting?: boolean;
     /** Node service only: bound shutdown of unfinished management HTTP bodies. */
     shutdownGraceMs?: number;
     /** IDE account bootstrap uses PROD, then the account's declared Cloud Code tier. */
     ideCloudCodeRouting?: boolean;
 }
+/** Registered by the desktop with its own live language-server port getter. */
+export declare function setLanguageServerPortResolver(resolve: () => number | undefined): void;
 export declare function loadCustomModels(): CustomModel[];
 export declare function startProxy(options?: ProxyStartOptions): Promise<number>;
 export declare function stopProxy(): Promise<void>;

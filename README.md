@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> · <a href="README_zh.md">简体中文</a>
+  <strong>English</strong> · <a href="README_zh.md">简体中文</a> · <a href="README_es.md">Español</a>
 </p>
 
 <p align="center">
@@ -43,6 +43,7 @@ Add external API providers and local models alongside Antigravity's built-in mod
 | [Providers and model catalogs](docs/providers.md) | [Model configuration](docs/configuration.md) | [Changelog](CHANGELOG.md) |
 | [Development and contributing](#development-and-contributing) | [Google account setup](docs/configuration.md#google-cloud-code-account-pools) | [Browse existing issues](https://github.com/vahapogut/antigravity-add-model/issues) |
 | [Antigravity IDE setup](docs/ide.md) | [Source-based feature comparison](docs/feature-parity.md) | [IDE status and restore](docs/ide.md#status-and-recovery) |
+| [Cloudflare setup wizard](docs/workers-ai-setup.md) | [Fallback chains](docs/providers.md#fallback-chains-for-rate-limited-providers) | [Local proxy security](docs/compatibility.md#local-proxy-trust-boundary) |
 
 ## What you can do
 
@@ -192,6 +193,11 @@ This option requires port **50999** and participates in backup/rollback. It is s
 
 **Running models locally?** Start your local server first, then choose **Discover local**. Discovery checks common ports only when requested.
 
+**Using Cloudflare Workers AI?** Run `npm run workers-ai:setup -- wizard` for
+guided account selection, scoped-token creation or an existing token, and model
+selection. The optional helper encrypts saved credentials and can rotate entries
+for one account. See [setup, permissions and verification limits](docs/workers-ai-setup.md).
+
 **Moving settings between machines?** Use **Export** and **Import**. Exported configurations omit API keys, custom headers, and Google tokens/client secrets; enter credentials on the receiving machine.
 
 > [!NOTE]
@@ -318,6 +324,7 @@ Use **Export** to share model settings. See [data handling](docs/configuration.m
 | --- | --- |
 | [Configuration reference](docs/configuration.md) | Model fields, import format, Google accounts, and credentials |
 | [Providers and model catalogs](docs/providers.md) | Popular services, API endpoints, large-catalog discovery, and account requirements |
+| [Cloudflare setup wizard](docs/workers-ai-setup.md) | Account selection, scoped tokens, encrypted model import and account-specific rotation |
 | [Gateway guide](gateway/README.md) | Setup, routing, dashboard, lifecycle, and remote access |
 | [Compatibility and recovery](docs/compatibility.md) | Supported layouts, updates, backups, and troubleshooting |
 | [Feature comparison](docs/feature-parity.md) | Reference repositories, implemented features, and remaining differences |

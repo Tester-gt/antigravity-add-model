@@ -10,6 +10,7 @@ function install(getLanguageServerPort) {
     if (installed)
         return;
     installed = true;
+    (0, proxy_1.setLanguageServerPortResolver)(getLanguageServerPort);
     (0, customIpc_1.registerCustomModelHandlers)();
     // Registered before the vendor's ready callback, without replacing its startup,
     // updater, WSL integration, certificate policy, or window configuration.

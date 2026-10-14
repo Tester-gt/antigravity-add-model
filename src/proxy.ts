@@ -85,6 +85,8 @@ export interface ProxyStartOptions {
   dataDirectory?: string;
   /** Addon-owned HTTP management routes. Return true when handled. */
   handleManagement?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
+  /** IDE service has no owned desktop LS; never reuse desktop routing/origin exceptions. */
+  allowLanguageServerRouting?: boolean;
   /** Node service only: bound shutdown of unfinished management HTTP bodies. */
   shutdownGraceMs?: number;
   /** IDE account bootstrap uses PROD, then the account's declared Cloud Code tier. */
@@ -114,7 +116,25 @@ import { readModelConfig, writeJsonAtomic } from './modelStore';
 import { getRequiredProxyPort, listenProxy } from './proxy/listen';
 import { subagentRouting, SubagentRoutingError } from './proxy/subagentRouting';
 import { resolveConfiguredSubagentModel } from './proxy/subagentModels';
+import { authenticatedGoogleFileUrl, guardLoopbackRequest, languageServerModelsUrl } from './proxy/loopbackSecurity';
 import { forwardNativeGeneration, NativeSubagentRouting } from './proxy/nativeSubagentResponse';
+
+let languageServerPortResolver: (() => number | undefined) | undefined;
+let languageServerRoutingEnabled = false;
+
+/** Registered by the desktop with its own live language-server port getter. */
+export function setLanguageServerPortResolver(resolve: () => number | undefined): void {
+  languageServerPortResolver = resolve;
+}
+
+function currentLanguageServerPort(): number | undefined {
+  if (!languageServerRoutingEnabled) return undefined;
+  try {
+    return languageServerPortResolver?.();
+  } catch {
+    return undefined;
+  }
+}
 
 // Dynamic imports (stays require for Electron-specific modules)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -643,7 +663,7 @@ async function resolveFileData(
         if (uri.startsWith('file://')) {
           const fp = uri.replace('file://', '').replace(/\//g, path.sep);
           if (fs.existsSync(fp)) fileContent = fs.readFileSync(fp, 'utf-8');
-        } else if (authHeader && uri.startsWith('https://')) {
+        } else if (authHeader && authenticatedGoogleFileUrl(uri)) {
           fileContent = await downloadFileContent(uri, authHeader);
         }
         if (fileContent) {
@@ -658,8 +678,12 @@ async function resolveFileData(
 
 function downloadFileContent(url: string, authHeader: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    (u.protocol === 'https:' ? https : http)
+    const u = authenticatedGoogleFileUrl(url);
+    if (!u) {
+      reject(new Error('Authenticated file downloads require a Google API HTTPS URL'));
+      return;
+    }
+    https
       .request(
         {
           hostname: u.hostname,
@@ -860,13 +884,12 @@ function encodeModelEntryForGetModels(
 // ─── GetAvailableModels Proxy Handler ───────────────────────────────────────
 
 function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer, lsUrl: string): void {
-  let lsParsed: URL;
-  try {
-    lsParsed = new URL(lsUrl);
-    if (!['http:', 'https:'].includes(lsParsed.protocol)) throw new Error('Invalid protocol');
-  } catch {
+  const lsParsed = languageServerModelsUrl(lsUrl, currentLanguageServerPort());
+  if (!lsParsed) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: { message: 'Invalid language server URL' } }));
+    res.end(
+      JSON.stringify({ error: { message: 'URL must target the active local language server model-list endpoint' } }),
+    );
     return;
   }
   const client = lsParsed.protocol === 'https:' ? https : http;
@@ -881,6 +904,8 @@ function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer
       Accept: 'application/grpc-web+proto',
       'Content-Length': String(reqBody.length),
     },
+    // The app's own loopback language server uses a self-signed certificate.
+    // This exception is reachable only after matching its trusted port and RPC path.
     rejectUnauthorized: false,
   };
 
@@ -1385,10 +1410,12 @@ export async function startProxy(options: ProxyStartOptions = {}): Promise<numbe
     throw new Error('Proxy port must be an integer between 1 and 65535');
   }
   serviceDataDirectory = options.dataDirectory ? path.resolve(options.dataDirectory) : undefined;
+  languageServerRoutingEnabled = options.allowLanguageServerRouting !== false;
   shutdownGraceMs = options.shutdownGraceMs;
   cloudCodeRouting = options.ideCloudCodeRouting ? new CloudCodeRouting() : undefined;
   const requiredPort = options.port ?? getRequiredProxyPort(require('electron').app.getAppPath());
   const newServer = http.createServer((req, res) => {
+    if (!guardLoopbackRequest(req, res, currentLanguageServerPort())) return;
     if (!options.handleManagement?.(req, res)) handleRequest(req, res);
   });
   server = newServer;

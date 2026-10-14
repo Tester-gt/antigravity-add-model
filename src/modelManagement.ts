@@ -597,12 +597,13 @@ export function createModelManager(
       return { success: true, accounts: getGooglePoolStatus() };
     },
     async googleTestAccount(input: { modelName?: string; accountId?: string; account?: GoogleAccount }) {
+      const endpoint = input.modelName ? store.read().find((model) => model.name === input.modelName)?.apiUrl : undefined;
       const previous = resolveGoogleAccount(input);
       const account = await dependencies.refreshGoogleAccount(previous);
       if (input.modelName) persistGoogleAccount(input.modelName, account, previous);
       else if (pending.has(account.id))
         pending.set(account.id, { account, expiresAt: dependencies.now() + 10 * 60 * 1000 });
-      const quota = await dependencies.fetchGoogleQuota(account);
+      const quota = await dependencies.fetchGoogleQuota(account, endpoint);
       return { success: true, quota };
     },
     async testModel(input: ProbeParams) {

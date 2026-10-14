@@ -1,11 +1,16 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { safeStorage, app } = (() => {
-  try { return require('electron'); } catch { return {}; }
+  try {
+    return require('electron');
+  } catch {
+    return {};
+  }
 })();
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes, createCipheriv, createDecipheriv } from 'crypto';
 import * as os from 'node:os';
+import log from 'electron-log';
 
 let credentialDirectory: string | undefined;
 /** Set before reading credentials when running the owned Node proxy service. */
@@ -44,10 +49,10 @@ export function backupFile(filePath: string): void {
     if (fs.existsSync(filePath)) {
       const backupPath = filePath + '.bak';
       fs.copyFileSync(filePath, backupPath);
-      console.log(`[CryptoStore] Backup created successfully at: ${backupPath}`);
+      log.info('[CryptoStore] Credential backup created.');
     }
-  } catch (err) {
-    console.error('[CryptoStore] Failed to create file backup:', err);
+  } catch {
+    log.error('[CryptoStore] Could not create credential backup. Check file permissions and available disk space.');
   }
 }
 
@@ -72,8 +77,8 @@ export function encryptString(plainText: string): string {
     try {
       const buffer = safeStorage.encryptString(plainText);
       return 'enc:' + buffer.toString('base64');
-    } catch (err) {
-      console.error('[CryptoStore] safeStorage encryption failed; using local authenticated encryption.');
+    } catch {
+      log.error('[CryptoStore] safeStorage encryption failed; using local authenticated encryption.');
       return encryptLocal(plainText);
     }
   } else {
@@ -95,6 +100,9 @@ export function decryptString(encryptedText: string): string {
       cipher.setAuthTag(bytes.subarray(12, 28));
       return Buffer.concat([cipher.update(bytes.subarray(28)), cipher.final()]).toString('utf8');
     } catch {
+      log.error(
+        '[CryptoStore] Local credentials could not be decrypted. Check the credential key or re-enter the key.',
+      );
       return 'DECRYPTION_FAILED';
     }
   }
@@ -105,12 +113,12 @@ export function decryptString(encryptedText: string): string {
       try {
         const buffer = Buffer.from(base64Data, 'base64');
         return safeStorage.decryptString(buffer);
-      } catch (err) {
-        console.error('[CryptoStore] safeStorage decryption failed:', err);
+      } catch {
+        log.error('[CryptoStore] OS-backed credentials could not be decrypted. Re-enter them in the model manager.');
         return 'DECRYPTION_FAILED';
       }
     } else {
-      console.error(
+      log.error(
         '[CryptoStore] OS-encrypted credentials are unavailable in this runtime. Re-enter them in its model manager.',
       );
       return 'DECRYPTION_FAILED_STORAGE_UNAVAILABLE';
@@ -119,8 +127,8 @@ export function decryptString(encryptedText: string): string {
     const base64Data = encryptedText.substring(9);
     try {
       return Buffer.from(base64Data, 'base64').toString('utf-8');
-    } catch (err) {
-      console.error('[CryptoStore] Fallback base64 decryption failed:', err);
+    } catch {
+      log.error('[CryptoStore] Legacy credentials could not be decoded. Re-enter them in the model manager.');
       return 'DECRYPTION_FAILED';
     }
   }

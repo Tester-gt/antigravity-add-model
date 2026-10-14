@@ -13,6 +13,7 @@ const source = ts.transpileModule(readFileSync(path.resolve('src/languageServer.
 
 function createFixture() {
   const startProxy = vi.fn<() => Promise<number>>();
+  const setLanguageServerPortResolver = vi.fn<(getPort: () => number) => void>();
   const logStreams: { end: ReturnType<typeof vi.fn>; write: ReturnType<typeof vi.fn> }[] = [];
   const createWriteStream = vi.fn(() => {
     const log = { end: vi.fn(), write: vi.fn() };
@@ -41,7 +42,7 @@ function createFixture() {
     },
     './constants': {},
     './utils': { setupNodeWrapper: vi.fn() },
-    './proxy': { startProxy },
+    './proxy': { startProxy, setLanguageServerPortResolver },
   };
   const module = {
     exports: {} as {
@@ -61,7 +62,7 @@ function createFixture() {
     setTimeout,
     clearTimeout,
   });
-  return { startProxy, spawn, shellEnvSync, logStreams, child, start: module.exports.startLanguageServer };
+  return { startProxy, setLanguageServerPortResolver, spawn, shellEnvSync, logStreams, child, start: module.exports.startLanguageServer };
 }
 
 describe('language-server proxy startup dependency', () => {
@@ -105,6 +106,10 @@ describe('language-server proxy startup dependency', () => {
     fixture.startProxy.mockResolvedValue(61002);
     const pending = fixture.start(0, 'fixture-token');
     await new Promise((resolve) => setImmediate(resolve));
+    expect(fixture.startProxy).toHaveBeenCalledWith();
+    expect(fixture.setLanguageServerPortResolver).toHaveBeenCalledOnce();
+    const livePort = fixture.setLanguageServerPortResolver.mock.calls[0][0];
+    expect(livePort()).toBe(0);
     const args = fixture.spawn.mock.calls[0][1] as string[];
     for (const flag of ['--api_server_url', '--cloud_code_endpoint', '--inference_api_server_url']) {
       expect(args[args.indexOf(flag) + 1]).toBe('http://localhost:61002');
@@ -112,9 +117,41 @@ describe('language-server proxy startup dependency', () => {
     fixture.child.stdout.write('listening on HTTP port at 60003 for HTTP\n');
     const handle = await pending;
     expect(handle.port).toBe(60003);
+    expect(livePort()).toBe(60003);
     fixture.child.emit('exit', 0, null);
     await handle.exitPromise;
+    expect(livePort()).toBe(0);
     fixture.child.stdout.end();
     fixture.child.stderr.end();
+  });
+
+  it('clears the old trusted port while restarting and ignores a replaced child exiting late', async () => {
+    const fixture = createFixture();
+    fixture.startProxy.mockResolvedValue(61002);
+    const firstPending = fixture.start(0, 'fixture-token');
+    await new Promise((resolve) => setImmediate(resolve));
+    fixture.child.stdout.write('listening on HTTP port at 60001 for HTTP\n');
+    const first = await firstPending;
+    const livePort = fixture.setLanguageServerPortResolver.mock.calls[0][0];
+    expect(livePort()).toBe(60001);
+
+    const second = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+    });
+    fixture.spawn.mockReturnValueOnce(second);
+    const secondPending = fixture.start(0, 'fixture-token');
+    expect(livePort()).toBe(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    second.stdout.write('listening on HTTP port at 60002 for HTTP\n');
+    const replacement = await secondPending;
+    expect(livePort()).toBe(60002);
+    fixture.child.emit('exit', 0, null);
+    await first.exitPromise;
+    expect(livePort()).toBe(60002);
+    second.emit('exit', 0, null);
+    await replacement.exitPromise;
+    expect(livePort()).toBe(0);
+    fixture.child.stdout.end(); fixture.child.stderr.end();
+    second.stdout.end(); second.stderr.end();
   });
 });

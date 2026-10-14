@@ -1,13 +1,14 @@
 /** Custom-model integration installed alongside the current vendor desktop runtime. */
 import { app, dialog, session } from 'electron';
 import { registerCustomModelHandlers } from './customIpc';
-import { getProxyPort, stopProxy } from './proxy';
+import { getProxyPort, setLanguageServerPortResolver, stopProxy } from './proxy';
 
 let installed = false;
 
 export function install(getLanguageServerPort: () => number): void {
   if (installed) return;
   installed = true;
+  setLanguageServerPortResolver(getLanguageServerPort);
   registerCustomModelHandlers();
 
   // Registered before the vendor's ready callback, without replacing its startup,

@@ -45,10 +45,12 @@ exports.resetGoogleAccountState = resetGoogleAccountState;
 const http = __importStar(require("http"));
 const https = __importStar(require("https"));
 const crypto_1 = require("crypto");
+const googleAccessErrors_1 = require("./googleAccessErrors");
 class GoogleAccountError extends Error {
     constructor(message, status = 503) {
         super(message);
         this.status = status;
+        this.category = (0, googleAccessErrors_1.describeGoogleAccessError)(status).category;
     }
 }
 exports.GoogleAccountError = GoogleAccountError;
@@ -161,11 +163,19 @@ async function postJson(url, headers, body) {
             });
             response.on('error', () => reject(new GoogleAccountError('Google account response was interrupted.', 502)));
             response.on('end', () => {
+                const status = response.statusCode || 502;
                 try {
-                    resolve({ status: response.statusCode || 502, data: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+                    const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                    if (!data || typeof data !== 'object' || Array.isArray(data))
+                        throw new Error();
+                    resolve({ status, data });
                 }
                 catch {
-                    reject(new GoogleAccountError('Google account service returned invalid JSON.', 502));
+                    // Preserve an upstream denial/overload even when its error page is HTML or empty.
+                    if (status < 200 || status >= 300)
+                        resolve({ status, data: {} });
+                    else
+                        reject(new GoogleAccountError('Google account service returned invalid JSON.', 502));
                 }
             });
         });
@@ -215,7 +225,7 @@ async function refreshGoogleAccount(account, tokenEndpointOverride = 'https://oa
             const invalidGrant = data.error === 'invalid_grant' || data.error === 'invalid_client';
             throw new GoogleAccountError(invalidGrant
                 ? 'Google rejected these OAuth credentials; reconnect this account.'
-                : `Google OAuth returned HTTP ${status}.`, invalidGrant ? 401 : status >= 400 ? status : 502);
+                : (0, googleAccessErrors_1.describeGoogleAccessError)(status >= 400 ? status : 502, 'oauth').message, invalidGrant ? 401 : status >= 400 ? status : 502);
         }
         const expiresIn = typeof data.expires_in === 'number' && data.expires_in > 0 ? data.expires_in : 3600;
         const updated = { ...account, accessToken: data.access_token, expiresAt: Date.now() + expiresIn * 1000 };
@@ -236,7 +246,7 @@ async function fetchGoogleQuota(account, baseURL = 'https://daily-cloudcode-pa.g
     const current = await refreshGoogleAccount(account);
     const { status, data } = await postJson(endpoint, { 'Content-Type': 'application/json', Authorization: `Bearer ${current.accessToken}` }, JSON.stringify(account.project ? { project: account.project } : {}));
     if (status < 200 || status >= 300)
-        throw new GoogleAccountError(`Google quota service returned HTTP ${status}.`, status);
+        throw new GoogleAccountError((0, googleAccessErrors_1.describeGoogleAccessError)(status, 'quota').message, status);
     const buckets = [];
     const groups = Array.isArray(data.groups) ? data.groups : [{ buckets: data.buckets }];
     for (const group of groups) {
@@ -270,7 +280,7 @@ async function fetchGoogleModels(account, baseURL = 'https://daily-cloudcode-pa.
     const current = await refreshGoogleAccount(account);
     const { status, data } = await postJson(endpoint, { 'Content-Type': 'application/json', Authorization: `Bearer ${current.accessToken}` }, JSON.stringify(current.project ? { project: current.project } : {}));
     if (status < 200 || status >= 300)
-        throw new GoogleAccountError(`Google model discovery returned HTTP ${status}.`, status);
+        throw new GoogleAccountError((0, googleAccessErrors_1.describeGoogleAccessError)(status, 'models').message, status);
     const models = data.models || data.availableModels || data.available_models;
     if (!models || typeof models !== 'object')
         throw new GoogleAccountError('Google did not return an available model list.', 502);
@@ -419,6 +429,7 @@ function getGooglePoolStatus() {
             failed: state.failed,
             avgLatencyMs: measuredLatency(state, now),
             lastStatus: state.lastStatus,
+            lastError: state.lastStatus >= 400 ? (0, googleAccessErrors_1.describeGoogleAccessError)(state.lastStatus) : undefined,
             quotaAgeMs: state.quota ? Math.max(0, now - state.quota.checkedAt) : undefined,
             quotaFresh: quotaIsFresh(state.quota, now),
             quotaExhausted: quotaExhausted(state, now),

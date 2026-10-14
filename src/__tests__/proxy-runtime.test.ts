@@ -1038,48 +1038,81 @@ describe('real upstream HTTP routing', () => {
     expect(getProxyMetrics().active).toBe(0);
   });
 
-  it('switches Google Cloud Code accounts before output, wraps the request and unwraps the response', async () => {
-    const captured: any[] = [];
-    const upstream = await serve(async (req, res) => {
-      captured.push({ url: req.url, auth: req.headers.authorization, body: await body(req) });
-      if (req.headers.authorization === 'Bearer limited') {
-        res.writeHead(429);
-        res.end('{}');
-      } else
-        res.end(
-          JSON.stringify({
-            response: {
-              candidates: [{ content: { role: 'model', parts: [{ text: 'pooled' }] }, finishReason: 'STOP' }],
-            },
-            traceId: 'upstream',
-          }),
-        );
-    });
-    const accounts = [
-      { id: 'limited', accessToken: 'limited' },
-      { id: 'ready', accessToken: 'ready', project: 'second-project' },
-    ];
-    const url = await proxy([
-      model(upstream, {
-        provider: 'google-cloudcode',
-        apiKey: '',
-        googleAccounts: accounts,
-        googleProject: 'first-project',
-      }),
-    ]);
-    expect(await (await fetch(url)).json()).toMatchObject({
-      candidates: [{ content: { parts: [{ text: 'pooled' }] } }],
-    });
-    expect(captured.map((request) => request.auth)).toEqual(['Bearer limited', 'Bearer ready']);
-    expect(captured[0].url).toBe('/v1internal:generateContent');
-    expect(captured[0].body).toMatchObject({
-      model: 'test-model',
-      project: 'first-project',
-      request: { contents: expect.any(Array) },
-    });
-    expect(captured[1].body.project).toBe('second-project');
-    expect(getGooglePoolStatus().every((state) => state.inFlight === 0)).toBe(true);
-  });
+  it.each([429, 503])(
+    'switches Google Cloud Code accounts after HTTP %s before output, wrapping and unwrapping the response',
+    async (status) => {
+      const captured: any[] = [];
+      const upstream = await serve(async (req, res) => {
+        captured.push({ url: req.url, auth: req.headers.authorization, body: await body(req) });
+        if (req.headers.authorization === 'Bearer limited') {
+          res.writeHead(status);
+          res.end('{}');
+        } else
+          res.end(
+            JSON.stringify({
+              response: {
+                candidates: [{ content: { role: 'model', parts: [{ text: 'pooled' }] }, finishReason: 'STOP' }],
+              },
+              traceId: 'upstream',
+            }),
+          );
+      });
+      const accounts = [
+        { id: 'limited', accessToken: 'limited' },
+        { id: 'ready', accessToken: 'ready', project: 'second-project' },
+      ];
+      const url = await proxy([
+        model(upstream, {
+          provider: 'google-cloudcode',
+          apiKey: '',
+          googleAccounts: accounts,
+          googleProject: 'first-project',
+        }),
+      ]);
+      expect(await (await fetch(url)).json()).toMatchObject({
+        candidates: [{ content: { parts: [{ text: 'pooled' }] } }],
+      });
+      expect(captured.map((request) => request.auth)).toEqual(['Bearer limited', 'Bearer ready']);
+      expect(captured[0].url).toBe('/v1internal:generateContent');
+      expect(captured[0].body).toMatchObject({
+        model: 'test-model',
+        project: 'first-project',
+        request: { contents: expect.any(Array) },
+      });
+      expect(captured[1].body.project).toBe('second-project');
+      expect(getGooglePoolStatus().every((state) => state.inFlight === 0)).toBe(true);
+    },
+  );
+
+  it.each([
+    [401, /Reconnect this account/],
+    [403, /account\/project permissions and service eligibility/],
+    [429, /rate or quota limit/],
+    [503, /temporarily unavailable/],
+  ] as const)(
+    'explains Google Cloud Code HTTP %s without exposing the provider error body',
+    async (status, guidance) => {
+      let calls = 0;
+      const upstream = await serve((_req, res) => {
+        calls++;
+        res.writeHead(status);
+        res.end(JSON.stringify({ error: { message: 'private-access-token private-project private-prompt' } }));
+      });
+      const url = await proxy([
+        model(upstream, {
+          provider: 'google-cloudcode',
+          googleAccounts: [{ id: 'one-account', accessToken: 'owned-token' }],
+        }),
+      ]);
+      const response = await fetch(url);
+      expect(response.status).toBe(status);
+      const result = await response.json();
+      expect(result.error.message).toMatch(guidance);
+      expect(result.error.message).toContain(`HTTP ${status}`);
+      expect(JSON.stringify(result)).not.toMatch(/private-access-token|private-project|private-prompt|owned-token/);
+      expect(calls).toBe(1);
+    },
+  );
 
   it('marks forbidden Google credentials and tries the next eligible account', async () => {
     const captured: string[] = [];

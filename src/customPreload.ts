@@ -313,7 +313,7 @@ window.addEventListener('DOMContentLoaded', () => {
       element(
         'p',
         'agy-muted',
-        'Add accounts you own using your Desktop OAuth client or a credential file. Save the model to retain changes. Existing secrets stay masked.',
+        'Add up to 50 accounts you own using your Desktop OAuth client or a credential file. This pool is separate from Antigravity’s built-in Google sign-in. Save the model to retain changes. Existing secrets stay masked.',
       ),
     );
     const list = element('div');
@@ -488,7 +488,7 @@ window.addEventListener('DOMContentLoaded', () => {
       element(
         'p',
         'agy-muted',
-        'Enter a Desktop OAuth client from your Google Cloud project. The browser opens only when you choose Sign in. Your project and account must be eligible for Cloud Code.',
+        'Enter a Desktop OAuth client from your Google Cloud project. Repeat Sign in with Google for each account, then save the model. Your project and account must have access to the configured Cloud Code service; native Antigravity access does not grant that access.',
       ),
     );
     const loginLabel = field(login, 'Account label', 'agy-google-login-label');
@@ -524,7 +524,7 @@ window.addEventListener('DOMContentLoaded', () => {
             loginSecret.value = '';
             setStatus(
               status,
-              'Account authorized. Save the model within 10 minutes to retain it; otherwise sign in again.',
+              'Account authorized. Save the model within 10 minutes to retain it; otherwise sign in again. Use Test account to check service access and quota.',
             );
           } finally {
             if (cancelModalOperation === cancel) cancelModalOperation = undefined;

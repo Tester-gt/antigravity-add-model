@@ -10,24 +10,29 @@ const source = ts.transpileModule(fs.readFileSync(path.resolve('src/cryptoStore.
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const directories: string[] = [];
-function fixture(available = false, failEncryption = false) {
+function fixture(available = false, failEncryption = false, failDecryption = false) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-crypto-'));
   directories.push(directory);
+  const logs: unknown[][] = [];
   const api = {} as { encryptString(value: string): string; decryptString(value: string): string };
   const dependencies: Record<string, unknown> = {
     fs,
     path,
     crypto,
     'node:os': os,
+    'electron-log': { info: (...args: unknown[]) => logs.push(args), error: (...args: unknown[]) => logs.push(args) },
     electron: {
       app: { getPath: () => directory },
       safeStorage: {
         isEncryptionAvailable: () => available,
         encryptString: (value: string) => {
-          if (failEncryption) throw new Error('fixture');
+          if (failEncryption) throw new Error('sensitive-provider-token');
           return Buffer.from(`os:${value}`);
         },
-        decryptString: (value: Buffer) => value.toString().slice(3),
+        decryptString: (value: Buffer) => {
+          if (failDecryption) throw new Error('sensitive-provider-token');
+          return value.toString().slice(3);
+        },
       },
     },
   };
@@ -40,7 +45,7 @@ function fixture(available = false, failEncryption = false) {
     Buffer,
     console: { log() {}, error() {} },
   });
-  return { ...api, directory, keyPath: path.join(directory, '.gemini', 'antigravity', '.model-credentials-key') };
+  return { ...api, logs, directory, keyPath: path.join(directory, '.gemini', 'antigravity', '.model-credentials-key') };
 }
 afterEach(() => {
   for (const directory of directories.splice(0)) {
@@ -87,5 +92,13 @@ describe('credential encryption', () => {
     const encrypted = codec.encryptString('secret');
     expect(encrypted).toMatch(/^local-gcm:/);
     expect(codec.decryptString(encrypted)).toBe('secret');
+    expect(codec.logs.flat().join(' ')).toContain('safeStorage encryption failed');
+    expect(JSON.stringify(codec.logs)).not.toContain('sensitive-provider-token');
+  });
+  it('reports credential failures through the logger without raw exception details', () => {
+    const codec = fixture(true, false, true);
+    expect(codec.decryptString('enc:c2VjcmV0')).toBe('DECRYPTION_FAILED');
+    expect(codec.logs.flat().join(' ')).toContain('OS-backed credentials could not be decrypted');
+    expect(JSON.stringify(codec.logs)).not.toContain('sensitive-provider-token');
   });
 });

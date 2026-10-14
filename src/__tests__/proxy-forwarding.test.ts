@@ -1,3 +1,4 @@
+import * as loopbackSecurity from '../proxy/loopbackSecurity';
 import * as subagentRoutingModule from '../proxy/subagentRouting';
 import * as subagentModels from '../proxy/subagentModels';
 import * as nativeSubagentResponse from '../proxy/nativeSubagentResponse';
@@ -88,6 +89,7 @@ async function fixture(
     './modelStore': { readModelConfig: () => [] },
     './schemaValidator': {},
     './cryptoStore': {},
+    './proxy/loopbackSecurity': loopbackSecurity,
     './proxy/listen': {
       getRequiredProxyPort: () => undefined,
       listenProxy: (server: http.Server) => listenProxy(server, 0),

@@ -1,4 +1,5 @@
 import type { GoogleCooldownReason } from './googlePoolPolicy';
+import { type GoogleAccessErrorCategory } from './googleAccessErrors';
 export interface GoogleAccount {
     id: string;
     label?: string;
@@ -37,6 +38,7 @@ export interface GoogleAccountLease {
 }
 export declare class GoogleAccountError extends Error {
     readonly status: number;
+    readonly category: GoogleAccessErrorCategory;
     constructor(message: string, status?: number);
 }
 declare let persistAccount: ((modelName: string, account: GoogleAccount, previousAccount: GoogleAccount) => Promise<void> | void) | undefined;
@@ -67,6 +69,10 @@ export declare function getGooglePoolStatus(): {
     failed: number;
     avgLatencyMs: number;
     lastStatus: number;
+    lastError: {
+        category: GoogleAccessErrorCategory;
+        message: string;
+    };
     quotaAgeMs: number;
     quotaFresh: boolean;
     quotaExhausted: boolean;

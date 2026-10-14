@@ -1,3 +1,4 @@
+import * as loopbackSecurity from '../proxy/loopbackSecurity';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -96,6 +97,7 @@ async function fixture(models: CustomModel[], fallback: string) {
     './modelStore': { readModelConfig: () => models.map((model) => ({ ...model })) },
     './schemaValidator': { validateCustomModel },
     './cryptoStore': { decryptModels: (values: CustomModel[]) => values },
+    './proxy/loopbackSecurity': loopbackSecurity,
     './proxy/listen': {
       getRequiredProxyPort: () => undefined,
       listenProxy: (server: http.Server) => listenProxy(server, 0),
