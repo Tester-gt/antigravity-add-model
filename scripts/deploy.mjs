@@ -29,6 +29,8 @@ export const REQUIRED_BUILD_FILES = [
   'googleAccounts.js',
   'googlePoolPolicy.js',
   'googleOAuth.js',
+  'googleNativeClient.js',
+  'googleOnboarding.js',
   'googleAccessErrors.js',
   'providers.js',
   'proxy.js',

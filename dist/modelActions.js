@@ -98,6 +98,7 @@ function createModelActions(manager) {
         'storage:google-login': manager.googleLogin,
         'storage:google-login-cancel': manager.googleLoginCancel,
         'storage:google-test-account': manager.googleTestAccount,
+        'storage:google-account-prepare': manager.googlePrepareAccount,
         'storage:google-pool-status': manager.googlePoolStatus,
         'storage:get-diagnostics': diagnostics_1.getDiagnostics,
         'storage:clear-diagnostics': diagnostics_1.clearDiagnostics,

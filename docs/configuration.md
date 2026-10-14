@@ -192,21 +192,43 @@ for setup, network listeners, tunnels, and the gateway's separate configuration.
 
 Choose **Google Cloud Code account pool** and enter an available model ID. Add
 an account before using **Fetch provider models**; discovery uses an enabled
-account. The pool is separate from the application's vendor-managed sign-in.
-Multi-account selection and automatic switching are already supported. This
-provider requires your own OAuth client or explicitly imported credentials; it
-does not sign into or switch the IDE's native Google session.
+account. Add up to 50 accounts you own and choose how the pool selects them.
+Pool sign-in creates a separate authorized session; it does not import or switch
+the IDE's existing Google session.
 
-1. Create your own Google OAuth client with application type **Desktop app** and configure consent/test users for your project. Enter its client ID and optional client secret under **Sign in with your OAuth client**.
-2. Click **Sign in with Google**. This explicitly opens the browser using Google's [installed-app OAuth flow](https://developers.google.com/identity/protocols/oauth2/native-app), with PKCE, state validation, and a temporary loopback callback. The requested scope is `cloud-platform`. You can cancel; the login attempt times out after two minutes.
-3. Repeat **Sign in with Google** for each account you want to add, then save the model within **10 minutes**. Pending credentials remain in main-process memory until saved; the renderer receives masked fields. Repeat sign-in if an unsaved entry expires.
-4. Alternatively, use **Import account credentials** for your own `authorized_user` JSON, an account object, or an array. Import itself makes no network requests. Save the model to retain the credentials encrypted.
-5. Use **Test account** to check authorization and retrieve a quota snapshot. **Pool status** shows current state. Quota refresh is explicit, not periodic.
+1. Under **Sign in with Google**, leave **Sign-in method → Antigravity account** selected. The addon reads the personal-account OAuth client profile from a recognized local **Antigravity IDE 2.5.5** installation; you do not need to create a Google Cloud OAuth client for this option. For a portable installation, set `ANTIGRAVITY_IDE_RESOURCES` to its `resources` directory before starting the app or proxy service. Unknown versions or layouts produce an explicit error rather than selecting a different client.
+2. Click **Sign in with Google** and complete browser consent. Both sign-in methods use [installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app) with PKCE, state validation and a temporary loopback callback. Antigravity mode uses the recognized app's scope set; custom mode requests `cloud-platform`. Browser sign-in expires after two minutes and can be cancelled.
+3. Antigravity sign-in then prepares the account's Cloud Code project and service endpoint. If first-time enrollment is needed, this explicit action can request the **free tier only**; Google still decides eligibility. It does not enroll in a paid tier. Wait for preparation to finish before saving.
+4. Repeat for each account, then **Save model** within **10 minutes** of each successful sign-in. Pending credentials stay in main-process memory; the UI receives masked fields. Saved tokens and client secrets are encrypted. Sign in again if an unsaved entry expires.
+5. Use **Test account** for access and quota, **Fetch provider models** for the catalog, and **Test generation** for a short model response. These check different things: successful login, project preparation or model listing does not establish successful generation. **Pool status** shows the current state; quota refresh is explicit, not periodic.
+
+To keep using your own client, select **My Desktop OAuth client**, enter its
+client ID and optional secret, and configure Google's **Desktop app** consent
+and test users for your project. This option retains the existing custom-client
+flow. You can also **Import account credentials** from your own `authorized_user`
+JSON, account object or array. Import itself makes no network requests.
+
+For an imported or previously saved account that needs project setup, click
+**Prepare account**, then **Save model** to retain the returned project and
+endpoint. If you edited an existing account's credentials or settings, save those
+changes before preparing it. Preparation can perform the same free-tier
+enrollment described above; ordinary listing and generation do not enroll accounts. Closing the
+dialog cancels an ongoing sign-in or preparation. Preparation has its own
+bounded timeout and reports an error if Google does not finish.
+
+For saved accounts, a successful token refresh is encrypted and retained even
+if the following preparation step fails or is cancelled. This preserves a newly
+rotated refresh token; it does not mark failed preparation as successful or
+overwrite concurrent account edits.
 
 Each account has a unique stable `id`, optional `label`, `enabled`, `project`,
 `clientId`, `clientSecret`, `refreshToken`, `accessToken`, and `expiresAt` (Unix
-milliseconds). Up to 50 accounts are supported. Keep the ID unchanged when
-editing masked credentials. Account `project` overrides `googleProject` when set.
+milliseconds). `authMode` records `antigravity` or `custom`; older entries without
+it retain custom-client behavior. Preparation also records `cloudCodeEndpoint`,
+restricted to the official production or daily Cloud Code origin, for subsequent
+account tests, discovery and generation. These fields survive editing and saving.
+Keep the ID unchanged when editing masked credentials. Account `project`
+overrides `googleProject` when set.
 
 `googlePool.strategy` accepts `round-robin`, `least-loaded`, `quota`, or `adaptive`.
 Adaptive selection compares two eligible candidates using measured time to
@@ -227,28 +249,47 @@ concurrency capacity remain account-wide. A quota snapshot disables an account
 globally only when all returned fresh buckets explicitly report zero. One empty
 Claude bucket must not disable a positive Gemini bucket. No refill time is guessed.
 
-No third-party OAuth client credentials are bundled, and no browser/IDE/gcloud
-credentials are automatically extracted. Successful OAuth does not grant Cloud
-Code entitlement, model access, or quota. Supply an eligible account/project;
-Google's location and service-access decisions remain in effect.
+The addon does not bundle the Antigravity OAuth client profile. It reads that
+profile from the recognized installed app without executing vendor code or
+extracting browser, IDE or gcloud account tokens. Consent remains explicit.
+Successful OAuth or preparation does not guarantee model access or quota;
+Google's location, eligibility and service-access decisions remain in effect.
 
-### Native sign-in and account access errors
+### Installation support
 
-Native Antigravity sign-in remains in the [IDE's own setup](ide.md#check-configure-and-launch).
-There is no client-free native sign-in integration in this account pool. As of
-**2026-10-14**, the official [Antigravity CLI authentication guide](https://antigravity.google/docs/cli/install)
-describes the CLI's own account sessions, while the [SDK guide](https://antigravity.google/docs/sdk/overview)
-documents Gemini API keys and Google Cloud credentials. Neither guide documents
-an OAuth client/grant for this proxy to reuse native consumer sign-in.
+Antigravity account sign-in currently recognizes the IDE **2.5.5** client module
+and build signature. A missing or unsupported installation fails before browser
+login; point `ANTIGRAVITY_IDE_RESOURCES` at the supported installation and restart,
+or explicitly choose **My Desktop OAuth client**. This is a version-specific
+adapter, not a promise that future vendor layouts will work unchanged. The
+[IDE's own setup](ide.md#check-configure-and-launch) remains separate.
 
-Google also documents that [consumer access to the former Gemini Code Assist and Gemini CLI ended on June 18, 2026](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals).
-The remaining [Code Assist service requires Standard or Enterprise access](https://docs.cloud.google.com/gemini/docs/codeassist/troubleshoot).
-This is distinct from [Antigravity's individual plans](https://antigravity.google/pricing).
-A successful OAuth exchange alone does not establish eligibility for either service.
+### Verified Google account flow
+
+On **2026-10-14**, a real Google account completed browser OAuth using the
+recognized official IDE **2.5.5** installation, followed by account/project
+preparation. Catalog discovery returned **HTTP 200 with 19 models**, and the quota
+request returned **HTTP 200**. A forced access-token expiry exercised a real
+refresh through Google's OAuth token endpoint; updated expiry and encrypted
+credentials were saved. A generation request to **`gemini-2.5-flash`** returned
+**HTTP 200** with the requested `OK` response.
+
+Cloud Code preparation, catalog, quota and generation requests now consistently
+send this application's own `User-Agent`. This resolved the catalog **403**
+observed during that test. It does not resolve every possible access denial;
+use the guidance below for account or project permission failures.
+
+This verifies the flow for one account on the recognized build, not universal
+account eligibility or future IDE versions. Two-account switching after an
+**HTTP 429** was verified with local fixtures, not with two live Google accounts.
+Automated fixtures also cover OAuth callbacks, preparation, refresh and
+cancellation. Use the separate checks above for your own account and model.
+
+### Account access errors
 
 | Result | Meaning and next step |
 | --- | --- |
-| **401** | Authorization was rejected. Reconnect the account with its OAuth client. |
+| **401** | Authorization was rejected. Reconnect the account using the same sign-in method. |
 | **403** | Access was denied. Check the endpoint, account/project permissions, enabled services and eligibility. During OAuth, also check consent/test-user settings. A 403 alone does not prove an Enterprise subscription is required. |
 | **429** | A rate or quota limit was reached. The pool respects the provider's retry/reset hints and can try another eligible configured account before output starts. |
 | **503** | The provider is temporarily unavailable or overloaded. Retry later; another account may encounter the same provider-wide demand. This is not evidence of invalid credentials or exhausted personal quota. |

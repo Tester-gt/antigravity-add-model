@@ -1,21 +1,24 @@
-/** Explicit Google desktop OAuth login. No bundled client credentials or automatic login. */
+/** Explicit Google desktop OAuth login with PKCE and a fresh loopback callback per attempt. */
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { describeGoogleAccessError } from './googleAccessErrors';
+import { GoogleNativeClient, resolveGoogleNativeClient } from './googleNativeClient';
 
 export const GOOGLE_AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPES = 'https://www.googleapis.com/auth/cloud-platform';
 
 export interface GoogleLoginOptions {
-  clientId: string;
+  authMode?: 'custom' | 'antigravity';
+  clientId?: string;
   clientSecret?: string;
   label?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
 export interface GoogleLoginAccount {
+  authMode?: 'custom' | 'antigravity';
   id: string;
   label?: string;
   accessToken: string;
@@ -33,6 +36,7 @@ export interface GoogleOAuthDependencies {
   /** Dependency injection is for local protocol tests; production always uses Google's fixed token URL. */
   exchangeToken?: (parameters: URLSearchParams, signal: AbortSignal) => Promise<TokenResponse>;
   now?: () => number;
+  resolveNativeClient?: () => GoogleNativeClient;
 }
 
 function cancellation(message = 'Google login cancelled'): Error {
@@ -118,8 +122,16 @@ export async function loginGoogleAccount(
   openExternal: (url: string) => Promise<unknown>,
   dependencies: GoogleOAuthDependencies = {},
 ): Promise<GoogleLoginAccount> {
-  const clientId = options.clientId?.trim();
-  const clientSecret = options.clientSecret?.trim();
+  if (options.signal?.aborted) throw cancellation();
+  if (options.authMode !== undefined && options.authMode !== 'custom' && options.authMode !== 'antigravity')
+    throw new Error('Choose Antigravity sign-in or Custom Desktop OAuth.');
+  const native =
+    options.authMode === 'antigravity' ? (dependencies.resolveNativeClient || resolveGoogleNativeClient)() : undefined;
+  const clientId = (native?.clientId ?? options.clientId)?.trim();
+  const clientSecret = (native?.clientSecret ?? options.clientSecret)?.trim();
+  // Match the recognized vendor client's registered callback while listening only on IPv4 loopback.
+  const callbackHost = native ? 'localhost' : '127.0.0.1';
+  const callbackPath = native ? '/oauth-callback' : '/oauth2callback';
   if (!clientId || !/^[A-Za-z0-9_.-]+\.apps\.googleusercontent\.com$/.test(clientId) || clientId.length > 512) {
     throw new Error('Enter your Google Desktop OAuth client ID (.apps.googleusercontent.com).');
   }
@@ -184,7 +196,7 @@ export async function loginGoogleAccount(
       if (
         req.headers.host !== expected.host ||
         callback.origin !== expected.origin ||
-        callback.pathname !== '/oauth2callback'
+        callback.pathname !== callbackPath
       ) {
         reply(404, 'Not found.');
         return;
@@ -237,6 +249,7 @@ export async function loginGoogleAccount(
             'Google login completed. Return to Antigravity and save the model to retain this account. You can close this page.',
           );
           finish(undefined, {
+            authMode: options.authMode || 'custom',
             id: randomUUID(),
             label: options.label?.trim() || 'Google account',
             accessToken: tokens.access_token,
@@ -269,15 +282,15 @@ export async function loginGoogleAccount(
         finish(new Error('Google login callback did not start'));
         return;
       }
-      redirectUri = `http://127.0.0.1:${address.port}/oauth2callback`;
+      redirectUri = `http://${callbackHost}:${address.port}${callbackPath}`;
       const authorization = new URL(GOOGLE_AUTHORIZATION_URL);
       authorization.search = new URLSearchParams({
         client_id: clientId,
         redirect_uri: redirectUri,
         response_type: 'code',
-        scope: SCOPES,
+        scope: native ? native.scopes.join(' ') : SCOPES,
         access_type: 'offline',
-        prompt: 'consent',
+        prompt: 'select_account consent',
         state,
         code_challenge: challenge,
         code_challenge_method: 'S256',

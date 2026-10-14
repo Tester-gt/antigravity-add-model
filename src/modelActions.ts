@@ -66,6 +66,7 @@ export function createModelActions(
     'storage:google-login': manager.googleLogin,
     'storage:google-login-cancel': manager.googleLoginCancel,
     'storage:google-test-account': manager.googleTestAccount,
+    'storage:google-account-prepare': manager.googlePrepareAccount,
     'storage:google-pool-status': manager.googlePoolStatus,
     'storage:get-diagnostics': getDiagnostics,
     'storage:clear-diagnostics': clearDiagnostics,

@@ -4,7 +4,13 @@ import { createHash, randomUUID } from 'crypto';
 import { StringDecoder } from 'string_decoder';
 import type { CustomModel } from '../proxy';
 import { resolveApiFormat } from '../providers';
-import { acquireGoogleAccount, GoogleAccountError, GoogleAccountLease } from '../googleAccounts';
+import {
+  acquireGoogleAccount,
+  googleAccountEndpoint,
+  GoogleAccountError,
+  GoogleAccountLease,
+  GOOGLE_CLOUD_CODE_USER_AGENT,
+} from '../googleAccounts';
 import { classifyGoogleRateLimit, type GoogleRateLimitDecision } from '../googlePoolPolicy';
 import { describeGoogleAccessError } from '../googleAccessErrors';
 import { beginDiagnosticRequest } from '../diagnostics';
@@ -327,10 +333,13 @@ export async function runCustomModelRequest(
             if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Unsupported endpoint protocol');
             headers = registry.getProviderHeaders(model.provider, cloudCode ? '' : model.apiKey, format);
             if (accountLease) {
+              url = new URL(googleAccountEndpoint(accountLease.account, model.apiUrl));
+              if (accountLease.account.authMode === 'antigravity' && !accountLease.account.project)
+                throw new Error('Prepare this Antigravity account in the model manager before generating a response');
               url.pathname = `/v1internal:${isStream ? 'streamGenerateContent' : 'generateContent'}`;
               url.search = isStream ? '?alt=sse' : '';
               headers.Authorization = `Bearer ${accountLease.account.accessToken}`;
-              headers['User-Agent'] = 'antigravity';
+              headers['User-Agent'] = GOOGLE_CLOUD_CODE_USER_AGENT;
               const project = accountLease.account.project || model.googleProject;
               payload = { model: externalName, ...(project ? { project } : {}), request: payload };
             }

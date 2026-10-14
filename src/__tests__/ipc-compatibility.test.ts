@@ -269,6 +269,7 @@ describe('standalone custom model addon', () => {
       'storage:google-login',
       'storage:google-login-cancel',
       'storage:google-test-account',
+      'storage:google-account-prepare',
       'storage:google-pool-status',
       'storage:get-diagnostics',
       'storage:clear-diagnostics',

@@ -226,10 +226,12 @@ window.addEventListener('DOMContentLoaded', () => {
     function createGoogleAccountPanel(parent, initialAccounts, modelName) {
         let accounts = initialAccounts.map((account) => ({ ...account }));
         const locallyEdited = new Set();
+        let accountOperationAttempt = 0;
+        let accountOperationPending = false;
         const panel = element('details');
         panel.open = true;
         panel.append(element('summary', '', 'Google accounts'));
-        panel.append(element('p', 'agy-muted', 'Add up to 50 accounts you own using your Desktop OAuth client or a credential file. This pool is separate from Antigravity’s built-in Google sign-in. Save the model to retain changes. Existing secrets stay masked.'));
+        panel.append(element('p', 'agy-muted', 'Add up to 50 accounts you own using Antigravity sign-in, your Desktop OAuth client, or a credential file. Save the model to retain changes. Existing secrets stay masked. Prepare account checks the Cloud Code project and may activate the available free tier.'));
         const list = element('div');
         list.id = 'agy-google-accounts-list';
         const editor = element('div');
@@ -278,6 +280,8 @@ window.addEventListener('DOMContentLoaded', () => {
                     accessToken: access.value.trim(),
                     expiresAt: readNumber(expires, 'Token expiry', 1),
                     project: project.value.trim(),
+                    authMode: account?.authMode,
+                    cloudCodeEndpoint: account?.cloudCodeEndpoint,
                     enabled: account?.enabled !== false,
                 };
                 // IDs bind masked secrets to their stored record, so changing an existing ID requires fresh credentials.
@@ -316,6 +320,40 @@ window.addEventListener('DOMContentLoaded', () => {
                         (result.quota
                             ? `Account verified. Quota: ${JSON.stringify(result.quota)}`
                             : 'Account verified. Generation was not tested.'));
+                }, status), button('Prepare account', async () => {
+                    if (accountOperationPending)
+                        throw new Error('Wait for the current Google account operation or cancel it.');
+                    accountOperationPending = true;
+                    const attempt = ++accountOperationAttempt;
+                    const cancel = () => {
+                        accountOperationAttempt++;
+                        void electron_1.ipcRenderer.invoke('storage:google-login-cancel').catch(() => { });
+                    };
+                    cancelModalOperation = cancel;
+                    try {
+                        setStatus(status, 'Preparing account access and Cloud Code project…');
+                        const result = await electron_1.ipcRenderer.invoke('storage:google-account-prepare', {
+                            ...(modelName && !locallyEdited.has(account.id)
+                                ? { modelName, accountId: account.id }
+                                : { account, ...(modelName ? { modelName } : {}) }),
+                            allowOnboard: true,
+                        });
+                        if (!panel.isConnected || accountOperationAttempt !== attempt)
+                            return;
+                        requireSuccess(result);
+                        if (!accounts.some((value) => value.id === account.id))
+                            return;
+                        if (!result.account || result.account.id !== account.id)
+                            throw new Error('Account preparation did not return the selected account.');
+                        addAccount({ ...account, ...result.account });
+                        setStatus(status, result.message ||
+                            'Account prepared. Save the model to retain the project. Generation was not tested.');
+                    }
+                    finally {
+                        accountOperationPending = false;
+                        if (cancelModalOperation === cancel)
+                            cancelModalOperation = undefined;
+                    }
                 }, status), button('Remove account', () => {
                     accounts = accounts.filter((value) => value.id !== account.id);
                     locallyEdited.delete(account.id);
@@ -333,40 +371,71 @@ window.addEventListener('DOMContentLoaded', () => {
             setStatus(status, JSON.stringify(result, null, 2));
         }, status));
         const login = element('details');
-        login.append(element('summary', '', 'Sign in with your OAuth client'));
-        login.append(element('p', 'agy-muted', 'Enter a Desktop OAuth client from your Google Cloud project. Repeat Sign in with Google for each account, then save the model. Your project and account must have access to the configured Cloud Code service; native Antigravity access does not grant that access.'));
+        login.append(element('summary', '', 'Sign in with Google'));
+        const loginMode = selectField(login, 'Sign-in method', 'agy-google-login-auth-mode', [
+            ['antigravity', 'Antigravity account'],
+            ['custom', 'My Desktop OAuth client'],
+        ], 'antigravity');
+        const loginHelp = element('p', 'agy-muted');
+        login.append(loginHelp);
         const loginLabel = field(login, 'Account label', 'agy-google-login-label');
         const loginClient = field(login, 'Desktop OAuth client ID', 'agy-google-login-client-id');
         const loginSecret = field(login, 'OAuth client secret (if required)', 'agy-google-login-client-secret', '', 'password');
+        const updateLoginMode = () => {
+            const native = loginMode.value === 'antigravity';
+            loginClient.closest('label').hidden = native;
+            loginSecret.closest('label').hidden = native;
+            loginHelp.textContent = native
+                ? 'Sign in through your browser using the installed Antigravity app’s OAuth client. This prepares your Cloud Code project and may activate the available free tier. A recognized Antigravity installation is required. Repeat for each account, then save the model. Generation must be tested separately.'
+                : 'Enter a Desktop OAuth client from your Google Cloud project. Your project and account must have access to the configured Cloud Code service. Repeat Sign in with Google for each account, then save the model.';
+        };
+        loginMode.addEventListener('change', updateLoginMode);
+        updateLoginMode();
         const loginActions = element('div', 'agy-actions');
         loginActions.append(button('Sign in with Google', async () => {
-            if (!loginClient.value.trim())
+            const authMode = loginMode.value === 'custom' ? 'custom' : 'antigravity';
+            if (authMode === 'custom' && !loginClient.value.trim())
                 throw new Error('Enter your Desktop OAuth client ID.');
+            if (accountOperationPending)
+                throw new Error('Wait for the current Google account operation or cancel it.');
+            accountOperationPending = true;
+            const attempt = ++accountOperationAttempt;
             const cancel = () => {
+                accountOperationAttempt++;
                 void electron_1.ipcRenderer.invoke('storage:google-login-cancel').catch(() => { });
             };
             cancelModalOperation = cancel;
-            setStatus(status, 'Complete consent in your browser. This login expires after two minutes.');
+            for (const input of [loginMode, loginLabel, loginClient, loginSecret])
+                input.disabled = true;
+            setStatus(status, authMode === 'antigravity'
+                ? 'Complete consent in your browser, then wait for account preparation. Browser login expires after two minutes.'
+                : 'Complete consent in your browser. This login expires after two minutes.');
             try {
                 const result = await electron_1.ipcRenderer.invoke('storage:google-login', {
-                    clientId: loginClient.value.trim(),
-                    clientSecret: loginSecret.value.trim() || undefined,
+                    authMode,
+                    ...(authMode === 'custom'
+                        ? { clientId: loginClient.value.trim(), clientSecret: loginSecret.value.trim() || undefined }
+                        : {}),
                     label: loginLabel.value.trim() || undefined,
                 });
-                requireSuccess(result);
-                if (!panel.isConnected)
+                if (!panel.isConnected || accountOperationAttempt !== attempt)
                     return;
+                requireSuccess(result);
                 if (!result.account)
                     throw new Error('Google login did not return an account.');
                 addAccount(result.account);
                 loginSecret.value = '';
-                setStatus(status, 'Account authorized. Save the model within 10 minutes to retain it; otherwise sign in again. Use Test account to check service access and quota.');
+                setStatus(status, 'Account authorized. Save the model within 10 minutes to retain it; otherwise sign in again. Use Test account to check service access and quota, then Test generation to verify a model response.');
             }
             finally {
+                accountOperationPending = false;
+                for (const input of [loginMode, loginLabel, loginClient, loginSecret])
+                    input.disabled = false;
                 if (cancelModalOperation === cancel)
                     cancelModalOperation = undefined;
             }
         }, status), button('Cancel Google login', async () => {
+            accountOperationAttempt++;
             requireSuccess(await electron_1.ipcRenderer.invoke('storage:google-login-cancel'));
             cancelModalOperation = undefined;
             setStatus(status, 'Google login cancelled.');
@@ -416,6 +485,8 @@ window.addEventListener('DOMContentLoaded', () => {
                     clientId: text('clientId', 'client_id'),
                     clientSecret: text('clientSecret', 'client_secret'),
                     project: text('project', 'quota_project_id'),
+                    ...(entry.authMode === 'custom' || entry.authMode === 'antigravity' ? { authMode: entry.authMode } : {}),
+                    ...(entry.cloudCodeEndpoint ? { cloudCodeEndpoint: text('cloudCodeEndpoint') } : {}),
                     enabled: entry.enabled !== false,
                     ...(entry.expiresAt != null ? { expiresAt: Number(entry.expiresAt) } : {}),
                 };

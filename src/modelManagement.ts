@@ -13,6 +13,7 @@ import {
 } from './modelStore';
 import { PROVIDERS, getProvider, resolveApiFormat, workersAiAccountPath } from './providers';
 import { loginGoogleAccount, GoogleLoginOptions } from './googleOAuth';
+import { prepareGoogleAccount } from './googleOnboarding';
 import { runGenerationProbe } from './generationProbe';
 import { validateCustomModel } from './schemaValidator';
 import type { CustomModel } from './proxy';
@@ -269,8 +270,22 @@ export function createModelManager(
   directory: string,
   codec: SecretCodec,
   openExternal: (url: string) => Promise<unknown>,
-  dependencies = { loginGoogleAccount, refreshGoogleAccount, fetchGoogleQuota, now: Date.now },
+  overrides: Partial<{
+    loginGoogleAccount: typeof loginGoogleAccount;
+    refreshGoogleAccount: typeof refreshGoogleAccount;
+    fetchGoogleQuota: typeof fetchGoogleQuota;
+    prepareGoogleAccount: typeof prepareGoogleAccount;
+    now: () => number;
+  }> = {},
 ) {
+  const dependencies = {
+    loginGoogleAccount,
+    refreshGoogleAccount,
+    fetchGoogleQuota,
+    prepareGoogleAccount,
+    now: Date.now,
+    ...overrides,
+  };
   const pending = new Map<string, { account: GoogleAccount; expiresAt: number }>();
   let loginController: AbortController | undefined;
   function pendingAccount(id: string) {
@@ -281,11 +296,17 @@ export function createModelManager(
     const account = pendingAccount(id);
     return account ? { ...account } : undefined;
   });
-  function persistGoogleAccount(modelName: string, account: GoogleAccount, previous?: GoogleAccount) {
+  function persistGoogleAccount(
+    modelName: string,
+    account: GoogleAccount,
+    previous?: GoogleAccount,
+    includePreparation = false,
+    requireUnchangedCredentials = includePreparation,
+  ) {
     const raw = store.read().find((item) => item.name === modelName);
-    if (!raw || !Array.isArray(raw.googleAccounts)) return;
+    if (!raw || !Array.isArray(raw.googleAccounts)) return false;
     const stored = raw.googleAccounts.find((item) => item.id === account.id);
-    if (!stored) return;
+    if (!stored) return false;
     if (previous) {
       const secret = (value: string | undefined) =>
         raw.encryptedGoogleAccounts ? decodeSecret(value, codec) : value || '';
@@ -294,21 +315,41 @@ export function createModelManager(
         (secret(stored.refreshToken) || secret(stored.accessToken)) !==
           (previous.refreshToken || previous.accessToken || '')
       )
-        return;
+        return false;
+      if (
+        includePreparation &&
+        ['project', 'cloudCodeEndpoint', 'authMode'].some(
+          (field) => stored[field] !== previous[field as keyof GoogleAccount],
+        )
+      )
+        return false;
+      if (
+        requireUnchangedCredentials &&
+        (['accessToken', 'refreshToken', 'clientSecret'] as const).some(
+          (field) => secret(stored[field]) !== (previous[field] || ''),
+        )
+      )
+        return false;
     }
     const model = redactModel(raw);
-    if (!Array.isArray(model.googleAccounts)) return;
+    if (!Array.isArray(model.googleAccounts)) return false;
     const index = model.googleAccounts.findIndex((item) => item.id === account.id);
-    if (index < 0) return; // Account or model removed while a request was in flight.
+    if (index < 0) return false; // Account or model removed while a request was in flight.
     model.googleAccounts[index] = {
       ...model.googleAccounts[index],
       accessToken: account.accessToken,
       refreshToken: account.refreshToken,
       expiresAt: account.expiresAt,
+      ...(includePreparation
+        ? { project: account.project, cloudCodeEndpoint: account.cloudCodeEndpoint, authMode: account.authMode }
+        : {}),
     };
     store.save(model);
+    return true;
   }
-  configureGoogleAccountPersistence(persistGoogleAccount);
+  configureGoogleAccountPersistence((modelName, account, previous) => {
+    persistGoogleAccount(modelName, account, previous);
+  });
   function saveModel(model: ModelEntry) {
     store.save(model);
     if (Array.isArray(model.googleAccounts))
@@ -329,12 +370,30 @@ export function createModelManager(
     if (!account.id) throw new Error('Select a Google account first');
     for (const field of ['accessToken', 'refreshToken', 'clientSecret'] as const) {
       const supplied = input.account?.[field];
-      if (supplied && !isMaskedSecret(supplied)) account[field] = supplied;
-      else if (saved?.[field])
+      if (supplied && !isMaskedSecret(supplied) && supplied !== saved?.[field]) {
+        if (/^(enc:|fallback:|local-gcm:|DECRYPTION_FAILED)/.test(supplied))
+          throw new Error('Enter fresh Google credentials instead of a machine-encrypted value');
+        account[field] = supplied;
+      } else if (saved?.[field])
         account[field] = savedModel?.encryptedGoogleAccounts ? decodeSecret(saved[field], codec) : saved[field];
       else account[field] = temporary?.[field];
     }
     return account;
+  }
+  function maskedGoogleAccount(account: GoogleAccount): GoogleAccount {
+    const masked = redactModel({
+      name: '',
+      provider: '',
+      apiUrl: '',
+      externalModelName: '',
+      googleAccounts: [account],
+    });
+    return (masked.googleAccounts as GoogleAccount[])[0];
+  }
+  function rememberGoogleAccount(account: GoogleAccount): void {
+    pendingAccount(account.id);
+    if (!pending.has(account.id) && pending.size >= 20) pending.delete(pending.keys().next().value!);
+    pending.set(account.id, { account, expiresAt: dependencies.now() + 10 * 60 * 1000 });
   }
   const gatewayFile = path.join(directory, 'gateway_connection.json');
   function gatewayRaw(): GatewayConnection {
@@ -565,8 +624,9 @@ export function createModelManager(
       const controller = new AbortController();
       loginController = controller;
       try {
-        const account = await dependencies.loginGoogleAccount(
+        let account: GoogleAccount = await dependencies.loginGoogleAccount(
           {
+            authMode: options.authMode,
             clientId: options.clientId,
             clientSecret: options.clientSecret,
             label: options.label,
@@ -574,17 +634,15 @@ export function createModelManager(
           },
           openExternal,
         );
-        pendingAccount(account.id);
-        if (pending.size >= 20) pending.delete(pending.keys().next().value!);
-        pending.set(account.id, { account, expiresAt: dependencies.now() + 10 * 60 * 1000 });
-        const masked = redactModel({
-          name: '',
-          provider: '',
-          apiUrl: '',
-          externalModelName: '',
-          googleAccounts: [account],
-        });
-        return { success: true, account: (masked.googleAccounts as GoogleAccount[])[0] };
+        if (controller.signal.aborted) throw new Error('Google login cancelled');
+        if (options.authMode === 'antigravity')
+          account = await dependencies.prepareGoogleAccount(
+            { ...account, authMode: 'antigravity' },
+            { signal: controller.signal, allowOnboard: true },
+          );
+        if (controller.signal.aborted) throw new Error('Google login cancelled');
+        rememberGoogleAccount(account);
+        return { success: true, account: maskedGoogleAccount(account) };
       } finally {
         if (loginController === controller) loginController = undefined;
       }
@@ -596,8 +654,82 @@ export function createModelManager(
     googlePoolStatus() {
       return { success: true, accounts: getGooglePoolStatus() };
     },
+    async googlePrepareAccount(input: {
+      modelName?: string;
+      accountId?: string;
+      account?: GoogleAccount;
+      allowOnboard?: boolean;
+    }) {
+      if (loginController) throw new Error('A Google login or account preparation is already in progress');
+      const controller = new AbortController();
+      loginController = controller;
+      try {
+        let previous = resolveGoogleAccount(input);
+        const saved = input.modelName ? store.read().find((model) => model.name === input.modelName) : undefined;
+        const savedAccount = (saved?.googleAccounts as GoogleAccount[] | undefined)?.find(
+          (account) => account.id === previous.id,
+        );
+        if (savedAccount) {
+          const metadataChanged = ['clientId', 'project', 'authMode', 'cloudCodeEndpoint'].some(
+            (field) => savedAccount[field as keyof GoogleAccount] !== previous[field as keyof GoogleAccount],
+          );
+          const credentialsChanged = (['accessToken', 'refreshToken', 'clientSecret'] as const).some((field) => {
+            const raw = savedAccount[field];
+            const value = raw && saved?.encryptedGoogleAccounts ? decodeSecret(raw, codec) : raw;
+            return (value || '') !== (previous[field] || '');
+          });
+          if (metadataChanged || credentialsChanged)
+            throw new Error('Save your edited account credentials and settings before preparing this account.');
+        }
+        const refreshed = await dependencies.refreshGoogleAccount(previous);
+        if (input.modelName && savedAccount) {
+          const tokensChanged = (['accessToken', 'refreshToken', 'expiresAt'] as const).some(
+            (field) => refreshed[field] !== previous[field],
+          );
+          // A successful refresh may rotate the only usable refresh token. Retain it even if
+          // preparation subsequently fails or is cancelled, without overwriting account edits.
+          if (tokensChanged && !persistGoogleAccount(input.modelName, refreshed, previous, false, true))
+            throw new Error('This account changed while preparation was running. Reload it and prepare again.');
+          previous = {
+            ...previous,
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken,
+            expiresAt: refreshed.expiresAt,
+          };
+          const current = resolveGoogleAccount({ modelName: input.modelName, accountId: previous.id });
+          if (
+            ['clientId', 'project', 'authMode', 'cloudCodeEndpoint'].some(
+              (field) => current[field as keyof GoogleAccount] !== previous[field as keyof GoogleAccount],
+            ) ||
+            (['accessToken', 'refreshToken', 'clientSecret'] as const).some(
+              (field) => (current[field] || '') !== (previous[field] || ''),
+            )
+          )
+            throw new Error('This account changed while preparation was running. Reload it and prepare again.');
+        }
+        if (controller.signal.aborted) throw new Error('Google account preparation cancelled');
+        const account = await dependencies.prepareGoogleAccount(refreshed, {
+          signal: controller.signal,
+          allowOnboard: input.allowOnboard === true,
+        });
+        if (controller.signal.aborted) throw new Error('Google account preparation cancelled');
+        if (input.modelName && savedAccount && !persistGoogleAccount(input.modelName, account, previous, true))
+          throw new Error('This account changed while preparation was running. Reload it and prepare again.');
+        rememberGoogleAccount(account);
+        resetGoogleAccountState(account.id);
+        return {
+          success: true,
+          account: maskedGoogleAccount(account),
+          message: 'Account project prepared. Save the model, then test model discovery and generation.',
+        };
+      } finally {
+        if (loginController === controller) loginController = undefined;
+      }
+    },
     async googleTestAccount(input: { modelName?: string; accountId?: string; account?: GoogleAccount }) {
-      const endpoint = input.modelName ? store.read().find((model) => model.name === input.modelName)?.apiUrl : undefined;
+      const endpoint = input.modelName
+        ? store.read().find((model) => model.name === input.modelName)?.apiUrl
+        : undefined;
       const previous = resolveGoogleAccount(input);
       const account = await dependencies.refreshGoogleAccount(previous);
       if (input.modelName) persistGoogleAccount(input.modelName, account, previous);

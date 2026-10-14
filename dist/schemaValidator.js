@@ -204,6 +204,10 @@ function validateCustomModel(model) {
                 if (entry[field] !== undefined && typeof entry[field] !== 'string')
                     return { valid: false, error: `Google account ${field} must be a string` };
             }
+            if (entry.authMode !== undefined && !['custom', 'antigravity'].includes(entry.authMode))
+                return { valid: false, error: 'Google account authMode must be custom or antigravity' };
+            if (entry.cloudCodeEndpoint !== undefined && !['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.googleapis.com'].includes(entry.cloudCodeEndpoint))
+                return { valid: false, error: 'Google account cloudCodeEndpoint must be an official Cloud Code origin' };
             if (entry.expiresAt !== undefined && (!Number.isSafeInteger(entry.expiresAt) || entry.expiresAt < 0))
                 return { valid: false, error: 'Google account expiresAt must be a timestamp in milliseconds' };
             if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean')

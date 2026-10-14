@@ -126,7 +126,7 @@ async function fixture(
     'storage:test-gateway': () => ({ success: true, message: 'Gateway authenticated; 2 aliases available' }),
     'storage:import-gateway-models': () => ({ success: true, count: 2 }),
     'storage:open-gateway-dashboard': () => ({ success: true }),
-    'storage:google-login': () => ({
+    'storage:google-login': (input) => ({
       success: true,
       account: {
         id: 'pending-account',
@@ -135,10 +135,25 @@ async function fixture(
         refreshToken: '********',
         accessToken: '********',
         expiresAt: 2000000000000,
+        authMode: input.authMode,
+        ...(input.authMode === 'antigravity'
+          ? { project: 'prepared-project', cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com' }
+          : {}),
       },
     }),
     'storage:google-login-cancel': () => ({ success: true }),
     'storage:google-test-account': () => ({ success: true, message: 'Quota checked', quota: { remaining: 75 } }),
+    'storage:google-account-prepare': (input) => ({
+      success: true,
+      account: {
+        ...(input.account ||
+          (models.find((entry) => entry.name === input.modelName)?.googleAccounts as { id: string }[])?.find(
+            (account) => account.id === input.accountId,
+          )),
+        project: 'prepared-project',
+        cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+      },
+    }),
     'storage:google-pool-status': () => ({ success: true, accounts: [{ id: 'saved-account', inFlight: 0 }] }),
   };
   const invoke = vi.fn(async (channel: string, ...args: unknown[]) => {
@@ -185,8 +200,12 @@ async function fixture(
 describe('custom model settings in the preserved vendor preload', () => {
   it('explains when a model has no available native picker identity', async () => {
     const f = await fixture(undefined, [{ ...model, nativePickerAvailable: false }]);
-    expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain('Not currently available in the native model picker');
-    expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain('Direct API access remains available');
+    expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain(
+      'Not currently available in the native model picker',
+    );
+    expect(f.document.getElementById('agy-custom-models-content')!.textContent).toContain(
+      'Direct API access remains available',
+    );
   });
 
   it('shows diagnostics with unknown usage and escapes model names in filtered history and export', async () => {
@@ -565,6 +584,9 @@ describe('custom model settings in the preserved vendor preload', () => {
       accessToken: '********',
       clientId: 'desktop.apps.googleusercontent.com',
       clientSecret: '********',
+      authMode: 'antigravity',
+      cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+      project: 'existing-project',
       enabled: true,
     };
     const f = await fixture(undefined, [
@@ -626,6 +648,9 @@ describe('custom model settings in the preserved vendor preload', () => {
             label: 'Renamed account',
             refreshToken: '********',
             clientSecret: '********',
+            authMode: 'antigravity',
+            cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+            project: 'existing-project',
           }),
         ],
         googleProject: 'my-project',
@@ -634,17 +659,21 @@ describe('custom model settings in the preserved vendor preload', () => {
     );
   });
 
-  it('starts browser login only after the explicit click and saves the pending masked account', async () => {
+  it('keeps custom OAuth login available and saves the pending masked account', async () => {
     const f = await fixture(undefined, []);
     await f.click('Add model');
     const provider = f.input('agy-provider', 'google-cloudcode');
     provider.dispatchEvent(new f.dom.window.Event('change'));
     expect(f.invoke.mock.calls.some(([channel]) => channel === 'storage:google-login')).toBe(false);
+    f.input('agy-google-login-auth-mode', 'custom').dispatchEvent(new f.dom.window.Event('change'));
+    expect(f.input('agy-google-login-client-id').closest('label')!.hidden).toBe(false);
+    expect(f.input('agy-google-login-client-secret').closest('label')!.hidden).toBe(false);
     f.input('agy-google-login-client-id', 'desktop.apps.googleusercontent.com');
     f.input('agy-google-login-client-secret', 'user-entered-client-secret');
     f.input('agy-google-login-label', 'New account');
     await f.click('Sign in with Google');
     expect(f.invoke).toHaveBeenCalledWith('storage:google-login', {
+      authMode: 'custom',
       clientId: 'desktop.apps.googleusercontent.com',
       clientSecret: 'user-entered-client-secret',
       label: 'New account',
@@ -665,6 +694,80 @@ describe('custom model settings in the preserved vendor preload', () => {
     );
   });
 
+  it('defaults to Antigravity login without client fields and retains the prepared account metadata', async () => {
+    const f = await fixture(undefined, []);
+    await f.click('Add model');
+    f.input('agy-provider', 'google-cloudcode').dispatchEvent(new f.dom.window.Event('change'));
+    expect(f.input('agy-google-login-auth-mode').value).toBe('antigravity');
+    expect(f.input('agy-google-login-client-id').closest('label')!.hidden).toBe(true);
+    expect(f.input('agy-google-login-client-secret').closest('label')!.hidden).toBe(true);
+    expect(f.invoke.mock.calls.some(([channel]) => channel === 'storage:google-login')).toBe(false);
+    f.input('agy-google-login-label', 'Personal');
+    await f.click('Sign in with Google');
+    expect(f.invoke).toHaveBeenCalledWith('storage:google-login', { authMode: 'antigravity', label: 'Personal' });
+    expect(f.document.getElementById('agy-google-accounts-list')!.textContent).toContain('prepared-project');
+    await f.click('Edit account');
+    f.input('agy-account-label', 'Prepared account');
+    await f.click('Apply account');
+    f.input('agy-model-id', 'gemini-model');
+    await f.click('Save model');
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:save-custom-model',
+      expect.objectContaining({
+        googleAccounts: [
+          expect.objectContaining({
+            authMode: 'antigravity',
+            project: 'prepared-project',
+            cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+            refreshToken: '********',
+            accessToken: '********',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('prepares a saved account explicitly and retains masked credentials and the returned project', async () => {
+    const f = await fixture(undefined, [
+      {
+        ...model,
+        provider: 'google-cloudcode',
+        googleAccounts: [
+          { id: 'saved-account', clientId: 'desktop.apps.googleusercontent.com', refreshToken: '********' },
+        ],
+      },
+    ]);
+    await f.click('Edit');
+    expect(f.invoke.mock.calls.some(([channel]) => channel === 'storage:google-account-prepare')).toBe(false);
+    await f.click('Prepare account');
+    expect(f.invoke).toHaveBeenCalledWith('storage:google-account-prepare', {
+      modelName: model.name,
+      accountId: 'saved-account',
+      allowOnboard: true,
+    });
+    expect(f.document.querySelector('[role="dialog"]')!.textContent).toContain('Generation was not tested.');
+    expect(f.document.getElementById('agy-google-accounts-list')!.textContent).not.toContain('********');
+    await f.click('Test account');
+    expect(f.invoke).toHaveBeenLastCalledWith('storage:google-test-account', {
+      modelName: model.name,
+      account: expect.objectContaining({ id: 'saved-account', refreshToken: '********', project: 'prepared-project' }),
+    });
+    await f.click('Save model');
+    expect(f.invoke).toHaveBeenCalledWith(
+      'storage:save-custom-model',
+      expect.objectContaining({
+        googleAccounts: [
+          expect.objectContaining({
+            id: 'saved-account',
+            refreshToken: '********',
+            project: 'prepared-project',
+            cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+          }),
+        ],
+      }),
+    );
+  });
+
   it('imports user-owned account JSON without performing login or quota requests', async () => {
     const f = await fixture(undefined, []);
     await f.click('Add model');
@@ -677,13 +780,15 @@ describe('custom model settings in the preserved vendor preload', () => {
         client_secret: 'entered-secret',
         refresh_token: 'entered-refresh',
         quota_project_id: 'owned-project',
+        authMode: 'antigravity',
+        cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
       }),
     );
     await f.click('Import accounts');
     expect(f.input('agy-google-account-json').value).toBe('');
     expect(
-      f.invoke.mock.calls.some(
-        ([channel]) => channel === 'storage:google-login' || channel === 'storage:google-test-account',
+      f.invoke.mock.calls.some(([channel]) =>
+        ['storage:google-login', 'storage:google-test-account', 'storage:google-account-prepare'].includes(channel),
       ),
     ).toBe(false);
     f.input('agy-model-id', 'gemini-model');
@@ -696,6 +801,8 @@ describe('custom model settings in the preserved vendor preload', () => {
             clientId: 'desktop.apps.googleusercontent.com',
             refreshToken: 'entered-refresh',
             project: 'owned-project',
+            authMode: 'antigravity',
+            cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
           }),
         ],
       }),
@@ -717,6 +824,65 @@ describe('custom model settings in the preserved vendor preload', () => {
     await f.click('Close');
     expect(f.invoke).toHaveBeenCalledWith('storage:google-login-cancel');
     expect(f.document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('cancels account preparation when the model dialog closes', async () => {
+    const f = await fixture(undefined, [
+      {
+        ...model,
+        provider: 'google-cloudcode',
+        googleAccounts: [
+          { id: 'saved-account', clientId: 'desktop.apps.googleusercontent.com', refreshToken: '********' },
+        ],
+      },
+    ]);
+    let finishPrepare!: (value: unknown) => void;
+    f.handlers['storage:google-account-prepare'] = () => new Promise((resolve) => (finishPrepare = resolve));
+    f.handlers['storage:google-login-cancel'] = () => {
+      finishPrepare({ success: false, error: 'Account preparation cancelled' });
+      return { success: true };
+    };
+    await f.click('Edit');
+    await f.click('Prepare account');
+    await f.click('Close');
+    expect(f.invoke).toHaveBeenCalledWith('storage:google-login-cancel');
+    expect(f.document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('ignores a late successful login response after cancellation', async () => {
+    const f = await fixture(undefined, []);
+    await f.click('Add model');
+    f.input('agy-provider', 'google-cloudcode').dispatchEvent(new f.dom.window.Event('change'));
+    let finishLogin!: (value: unknown) => void;
+    f.handlers['storage:google-login'] = () => new Promise((resolve) => (finishLogin = resolve));
+    await f.click('Sign in with Google');
+    expect(f.input('agy-google-login-auth-mode').disabled).toBe(true);
+    await f.click('Cancel Google login');
+    finishLogin({ success: true, account: { id: 'late-account', accessToken: '********' } });
+    await settle();
+    expect(f.document.getElementById('agy-google-accounts-list')!.textContent).toContain(
+      'No Google accounts configured.',
+    );
+    expect(f.input('agy-google-login-auth-mode').disabled).toBe(false);
+  });
+
+  it('surfaces an unavailable Antigravity installation without falling back to custom OAuth', async () => {
+    const f = await fixture(undefined, []);
+    await f.click('Add model');
+    f.input('agy-provider', 'google-cloudcode').dispatchEvent(new f.dom.window.Event('change'));
+    f.handlers['storage:google-login'] = () => ({
+      success: false,
+      error: 'No recognized Antigravity installation found.',
+    });
+    await f.click('Sign in with Google');
+    expect(f.document.querySelector('[role="dialog"]')!.textContent).toContain(
+      'No recognized Antigravity installation found.',
+    );
+    expect(f.invoke.mock.calls.filter(([channel]) => channel === 'storage:google-login')).toHaveLength(1);
+    expect(f.input('agy-google-login-auth-mode').value).toBe('antigravity');
+    expect(f.document.getElementById('agy-google-accounts-list')!.textContent).toContain(
+      'No Google accounts configured.',
+    );
   });
 
   it.each(['MCP', 'MCP Servers', 'Models & Usage'])(
@@ -758,7 +924,11 @@ describe('custom model settings in the preserved vendor preload', () => {
   });
 
   it('requires a settings surface before accepting a generic Models & Usage heading', async () => {
-    const f = await fixture('<main><h2>Models &amp; Usage</h2></main>', [model], 'http://127.0.0.1:54321/c/conversation');
+    const f = await fixture(
+      '<main><h2>Models &amp; Usage</h2></main>',
+      [model],
+      'http://127.0.0.1:54321/c/conversation',
+    );
     expect(f.document.querySelector('#agy-custom-models-section')).toBeNull();
   });
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -316,6 +316,477 @@ describe('model storage and compatibility', () => {
       'private-fresh',
     );
   });
+
+  it('prepares native login before returning a masked pending account and saves its project and encrypted credentials', async () => {
+    const { directory } = setup();
+    const native = {
+      id: 'native-pending',
+      authMode: 'antigravity' as const,
+      clientId: 'native.apps.googleusercontent.com',
+      clientSecret: 'private-native-client',
+      accessToken: 'private-native-access',
+      refreshToken: 'private-native-refresh',
+      expiresAt: Date.now() + 3600000,
+    };
+    const login = vi.fn(async () => native);
+    const prepare = vi.fn(async (account: GoogleAccount) => ({
+      ...account,
+      project: 'prepared-native-project',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    }));
+    const manager = createModelManager(directory, codec, async () => {}, {
+      loginGoogleAccount: login,
+      prepareGoogleAccount: prepare,
+    });
+    const result = await manager.googleLogin({ authMode: 'antigravity', label: 'Personal' });
+    expect(login).toHaveBeenCalledWith(
+      expect.objectContaining({ authMode: 'antigravity', signal: expect.any(AbortSignal) }),
+      expect.any(Function),
+    );
+    expect(prepare).toHaveBeenCalledWith(
+      native,
+      expect.objectContaining({ allowOnboard: true, signal: expect.any(AbortSignal) }),
+    );
+    expect(JSON.stringify(result)).not.toContain('private-');
+    expect(result.account).toMatchObject({
+      authMode: 'antigravity',
+      project: 'prepared-native-project',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+      accessToken: '********',
+      refreshToken: '********',
+      clientSecret: '********',
+    });
+    expect(fs.existsSync(manager.store.filename)).toBe(false);
+    manager.saveModel({ ...googleEntry, googleAccounts: [result.account] });
+    const stored = (manager.store.read()[0].googleAccounts as GoogleAccount[])[0];
+    expect(stored).toMatchObject({
+      authMode: 'antigravity',
+      project: 'prepared-native-project',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    });
+    for (const field of ['accessToken', 'refreshToken', 'clientSecret'] as const)
+      expect(codec.decryptString(stored[field]!)).toBe(native[field]);
+    expect(fs.readFileSync(manager.store.filename, 'utf8')).not.toContain('private-');
+  });
+
+  it('does not enroll legacy custom OAuth logins automatically', async () => {
+    const { directory } = setup();
+    const prepare = vi.fn();
+    const manager = createModelManager(directory, codec, async () => {}, {
+      loginGoogleAccount: async () => ({
+        id: 'custom-pending',
+        clientId: 'custom.apps.googleusercontent.com',
+        accessToken: 'private-custom-access',
+        expiresAt: Date.now() + 3600000,
+      }),
+      prepareGoogleAccount: prepare,
+    });
+    await manager.googleLogin({ clientId: 'custom.apps.googleusercontent.com' });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['accessToken', 'private-edited-access'],
+    ['refreshToken', 'private-edited-refresh'],
+    ['clientSecret', 'private-edited-secret'],
+    ['clientId', 'edited.apps.googleusercontent.com'],
+    ['project', 'edited-project'],
+    ['authMode', 'custom'],
+    ['cloudCodeEndpoint', 'https://cloudcode-pa.googleapis.com'],
+  ])('refuses unsaved %s changes before refresh or preparation can start', async (field, value) => {
+    const { directory } = setup();
+    const refresh = vi.fn();
+    const prepare = vi.fn();
+    const manager = createModelManager(directory, codec, async () => {}, {
+      refreshGoogleAccount: refresh,
+      prepareGoogleAccount: prepare,
+    });
+    manager.saveModel({
+      ...googleEntry,
+      googleAccounts: [
+        {
+          id: 'save-first',
+          clientId: 'original.apps.googleusercontent.com',
+          clientSecret: 'private-original-secret',
+          accessToken: 'private-original-access',
+          refreshToken: 'private-original-refresh',
+          project: 'original-project',
+          authMode: 'antigravity',
+          cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+        },
+      ],
+    });
+    const before = fs.readFileSync(manager.store.filename, 'utf8');
+    const masked = (manager.store.list()[0].googleAccounts as GoogleAccount[])[0];
+    await expect(
+      manager.googlePrepareAccount({
+        modelName: googleEntry.name,
+        account: { ...masked, [field]: value },
+        allowOnboard: true,
+      }),
+    ).rejects.toThrow('Save your edited account');
+    expect(refresh).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(fs.readFileSync(manager.store.filename, 'utf8')).toBe(before);
+  });
+
+  it('prepares edited credentials after Save and retains the fresh credentials through a masked resave', async () => {
+    const { directory } = setup();
+    const prepare = vi.fn(async (account: GoogleAccount) => ({
+      ...account,
+      project: 'new-prepared-project',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    }));
+    const manager = createModelManager(directory, codec, async () => {}, {
+      refreshGoogleAccount: async (account) => account,
+      prepareGoogleAccount: prepare,
+    });
+    manager.saveModel({
+      ...googleEntry,
+      googleAccounts: [
+        {
+          id: 'edited-saved',
+          clientId: 'original.apps.googleusercontent.com',
+          clientSecret: 'private-original-secret',
+          accessToken: 'private-original-access',
+          refreshToken: 'private-original-refresh',
+        },
+      ],
+    });
+    const edited: GoogleAccount = {
+      id: 'edited-saved',
+      clientId: 'edited.apps.googleusercontent.com',
+      clientSecret: 'private-edited-secret',
+      accessToken: 'private-edited-access',
+      refreshToken: 'private-edited-refresh',
+      authMode: 'antigravity',
+    };
+    manager.saveModel({ ...googleEntry, googleAccounts: [edited] });
+    const result = await manager.googlePrepareAccount({
+      modelName: googleEntry.name,
+      accountId: edited.id,
+      allowOnboard: true,
+    });
+    expect(prepare).toHaveBeenCalledWith(edited, expect.objectContaining({ allowOnboard: true }));
+    expect(JSON.stringify(result)).not.toContain('private-');
+    manager.saveModel({ ...googleEntry, googleAccounts: [result.account] });
+    const stored = (manager.store.read()[0].googleAccounts as GoogleAccount[])[0];
+    expect(stored).toMatchObject({
+      project: 'new-prepared-project',
+      authMode: 'antigravity',
+      clientId: edited.clientId,
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    });
+    for (const field of ['accessToken', 'refreshToken', 'clientSecret'] as const)
+      expect(codec.decryptString(stored[field]!)).toBe(edited[field]);
+  });
+
+  it.each([
+    ['project', 'concurrent-project'],
+    ['cloudCodeEndpoint', 'https://cloudcode-pa.googleapis.com'],
+    ['authMode', 'custom'],
+    ['clientId', 'concurrent.apps.googleusercontent.com'],
+    ['clientSecret', 'private-concurrent-secret'],
+    ['accessToken', 'private-concurrent-access'],
+    ['refreshToken', 'private-concurrent-refresh'],
+  ])('does not overwrite a saved %s edit with a stale preparation result', async (field, value) => {
+    const { directory } = setup();
+    let finish!: (account: GoogleAccount & { project: string; cloudCodeEndpoint: string }) => void;
+    let started!: () => void;
+    const preparing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const manager = createModelManager(directory, codec, async () => {}, {
+      refreshGoogleAccount: async (account) => account,
+      prepareGoogleAccount: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+          started();
+        }),
+    });
+    const original: GoogleAccount = {
+      id: 'concurrent-preparation',
+      clientId: 'original.apps.googleusercontent.com',
+      clientSecret: 'private-original-secret',
+      accessToken: 'private-original-access',
+      refreshToken: 'private-original-refresh',
+      project: 'original-project',
+      authMode: 'antigravity',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    };
+    manager.saveModel({ ...googleEntry, googleAccounts: [original] });
+    const result = manager.googlePrepareAccount({
+      modelName: googleEntry.name,
+      accountId: original.id,
+      allowOnboard: true,
+    });
+    await preparing;
+    manager.saveModel({ ...googleEntry, googleAccounts: [{ ...original, [field]: value }] });
+    const savedAfterEdit = fs.readFileSync(manager.store.filename, 'utf8');
+    finish({
+      ...original,
+      accessToken: 'private-stale-access',
+      project: 'stale-prepared-project',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    });
+    await expect(result).rejects.toThrow('changed while preparation was running');
+    expect(fs.readFileSync(manager.store.filename, 'utf8')).toBe(savedAfterEdit);
+    // A failed operation must not leave stale credentials reusable through the pending-account path.
+    expect(() =>
+      manager.saveModel({
+        ...googleEntry,
+        name: 'models/no-stale-pending',
+        googleAccounts: [{ id: original.id, accessToken: '********' }],
+      }),
+    ).toThrow('expired or unavailable');
+  });
+
+  it.each(['failure', 'cancel-preparation', 'cancel-refresh', 'success'] as const)(
+    'retains a saved account’s rotated token when account preparation ends with %s',
+    async (outcome) => {
+      const { directory } = setup();
+      const original: GoogleAccount = {
+        id: 'rotating-preparation',
+        clientId: 'fixture.apps.googleusercontent.com',
+        clientSecret: 'private-client-secret',
+        accessToken: 'private-old-access',
+        refreshToken: 'private-old-refresh',
+        expiresAt: 1,
+        project: 'original-project',
+        authMode: 'antigravity',
+        cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+      };
+      const rotated: GoogleAccount = {
+        ...original,
+        accessToken: 'private-rotated-access',
+        refreshToken: 'private-rotated-refresh',
+        expiresAt: Date.now() + 3600000,
+      };
+      let finishRefresh!: (account: GoogleAccount) => void;
+      let finishPreparation!: (account: GoogleAccount & { project: string; cloudCodeEndpoint: string }) => void;
+      let failPreparation!: (error: Error) => void;
+      let started!: () => void;
+      const preparing = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const prepare = vi.fn(
+        () =>
+          new Promise<GoogleAccount & { project: string; cloudCodeEndpoint: string }>((resolve, reject) => {
+            finishPreparation = resolve;
+            failPreparation = reject;
+            started();
+          }),
+      );
+      const manager = createModelManager(directory, codec, async () => {}, {
+        refreshGoogleAccount: () =>
+          new Promise((resolve) => {
+            finishRefresh = resolve;
+          }),
+        prepareGoogleAccount: prepare,
+      });
+      manager.saveModel({ ...googleEntry, googleAccounts: [original] });
+      const result = manager.googlePrepareAccount({
+        modelName: googleEntry.name,
+        accountId: original.id,
+        allowOnboard: true,
+      });
+      if (outcome === 'cancel-refresh') manager.googleLoginCancel();
+      finishRefresh(rotated);
+      if (outcome !== 'cancel-refresh') {
+        await preparing;
+        // Rotation is durable before the next Google operation has returned.
+        const duringPreparation = (manager.store.read()[0].googleAccounts as GoogleAccount[])[0];
+        expect(codec.decryptString(duringPreparation.refreshToken!)).toBe(rotated.refreshToken);
+        expect(duringPreparation.project).toBe(original.project);
+        if (outcome === 'failure') failPreparation(new Error('Preparation fixture failed'));
+        else {
+          if (outcome === 'cancel-preparation') manager.googleLoginCancel();
+          finishPreparation({
+            ...rotated,
+            project: 'new-prepared-project',
+            cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+          });
+        }
+      }
+      if (outcome === 'success') await expect(result).resolves.toMatchObject({ success: true });
+      else await expect(result).rejects.toThrow(outcome === 'failure' ? 'Preparation fixture failed' : /cancelled/i);
+      const stored = (manager.store.read()[0].googleAccounts as GoogleAccount[])[0];
+      expect(codec.decryptString(stored.refreshToken!)).toBe(rotated.refreshToken);
+      expect(codec.decryptString(stored.accessToken!)).toBe(rotated.accessToken);
+      expect(stored.expiresAt).toBe(rotated.expiresAt);
+      expect(stored.project).toBe(outcome === 'success' ? 'new-prepared-project' : original.project);
+      expect(stored.cloudCodeEndpoint).toBe(
+        outcome === 'success' ? 'https://daily-cloudcode-pa.googleapis.com' : original.cloudCodeEndpoint,
+      );
+      expect(fs.readFileSync(manager.store.filename, 'utf8')).not.toContain('private-');
+      if (outcome === 'cancel-refresh') expect(prepare).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['clientId', 'edited.apps.googleusercontent.com'],
+    ['clientSecret', 'private-edited-secret'],
+    ['accessToken', 'private-edited-access'],
+    ['refreshToken', 'private-edited-refresh'],
+  ])('does not persist a stale rotation over a %s edit made during refresh', async (field, value) => {
+    const { directory } = setup();
+    let finishRefresh!: (account: GoogleAccount) => void;
+    const prepare = vi.fn();
+    const manager = createModelManager(directory, codec, async () => {}, {
+      refreshGoogleAccount: () =>
+        new Promise((resolve) => {
+          finishRefresh = resolve;
+        }),
+      prepareGoogleAccount: prepare,
+    });
+    const original: GoogleAccount = {
+      id: 'concurrent-refresh-prepare',
+      clientId: 'original.apps.googleusercontent.com',
+      clientSecret: 'private-original-secret',
+      accessToken: 'private-original-access',
+      refreshToken: 'private-original-refresh',
+      expiresAt: 1,
+    };
+    manager.saveModel({ ...googleEntry, googleAccounts: [original] });
+    const result = manager.googlePrepareAccount({
+      modelName: googleEntry.name,
+      accountId: original.id,
+      allowOnboard: true,
+    });
+    manager.saveModel({ ...googleEntry, googleAccounts: [{ ...original, [field]: value }] });
+    const afterEdit = fs.readFileSync(manager.store.filename, 'utf8');
+    finishRefresh({
+      ...original,
+      accessToken: 'private-stale-rotated-access',
+      refreshToken: 'private-stale-rotated-refresh',
+      expiresAt: Date.now() + 3600000,
+    });
+    await expect(result).rejects.toThrow('changed while preparation was running');
+    expect(prepare).not.toHaveBeenCalled();
+    expect(fs.readFileSync(manager.store.filename, 'utf8')).toBe(afterEdit);
+  });
+
+  it('retains a valid rotation but preserves a project edited during refresh and stops preparation', async () => {
+    const { directory } = setup();
+    let finishRefresh!: (account: GoogleAccount) => void;
+    const prepare = vi.fn();
+    const manager = createModelManager(directory, codec, async () => {}, {
+      refreshGoogleAccount: () =>
+        new Promise((resolve) => {
+          finishRefresh = resolve;
+        }),
+      prepareGoogleAccount: prepare,
+    });
+    const original: GoogleAccount = {
+      id: 'refresh-project-edit',
+      clientId: 'original.apps.googleusercontent.com',
+      accessToken: 'private-original-access',
+      refreshToken: 'private-original-refresh',
+      expiresAt: 1,
+      project: 'original-project',
+    };
+    manager.saveModel({ ...googleEntry, googleAccounts: [original] });
+    const result = manager.googlePrepareAccount({
+      modelName: googleEntry.name,
+      accountId: original.id,
+      allowOnboard: true,
+    });
+    manager.saveModel({ ...googleEntry, googleAccounts: [{ ...original, project: 'edited-project' }] });
+    finishRefresh({
+      ...original,
+      accessToken: 'private-rotated-access',
+      refreshToken: 'private-rotated-refresh',
+      expiresAt: Date.now() + 3600000,
+    });
+    await expect(result).rejects.toThrow('changed while preparation was running');
+    expect(prepare).not.toHaveBeenCalled();
+    const stored = (manager.store.read()[0].googleAccounts as GoogleAccount[])[0];
+    expect(stored.project).toBe('edited-project');
+    expect(codec.decryptString(stored.refreshToken!)).toBe('private-rotated-refresh');
+  });
+
+  it('does not create a saved or pending account from an unsuccessful unsaved preparation refresh', async () => {
+    const { directory } = setup();
+    const manager = createModelManager(directory, codec, async () => {}, {
+      refreshGoogleAccount: async (account) => ({
+        ...account,
+        accessToken: 'private-new-access',
+        refreshToken: 'private-new-refresh',
+      }),
+      prepareGoogleAccount: async () => {
+        throw new Error('Preparation fixture failed');
+      },
+    });
+    await expect(
+      manager.googlePrepareAccount({
+        account: {
+          id: 'never-saved',
+          clientId: 'fixture.apps.googleusercontent.com',
+          refreshToken: 'private-original-refresh',
+        },
+        allowOnboard: true,
+      }),
+    ).rejects.toThrow('Preparation fixture failed');
+    expect(fs.existsSync(manager.store.filename)).toBe(false);
+    expect(() =>
+      manager.saveModel({ ...googleEntry, googleAccounts: [{ id: 'never-saved', refreshToken: '********' }] }),
+    ).toThrow('expired or unavailable');
+  });
+
+  it.each(['login', 'prepare'] as const)(
+    'discards a cancelled %s bootstrap result that completes late',
+    async (operation) => {
+      const { directory } = setup();
+      const account = {
+        id: `cancelled-${operation}`,
+        clientId: 'fixture.apps.googleusercontent.com',
+        accessToken: 'private-cancelled-access',
+        refreshToken: 'private-cancelled-refresh',
+        expiresAt: Date.now() + 3600000,
+        authMode: 'antigravity' as const,
+      };
+      let finish!: (account: GoogleAccount & { project: string; cloudCodeEndpoint: string }) => void;
+      let started!: () => void;
+      let signal!: AbortSignal;
+      const preparing = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const manager = createModelManager(directory, codec, async () => {}, {
+        loginGoogleAccount: async () => account,
+        refreshGoogleAccount: async (value) => value,
+        prepareGoogleAccount: (_account, options) =>
+          new Promise((resolve) => {
+            finish = resolve;
+            signal = options!.signal!;
+            started();
+          }),
+      });
+      if (operation === 'prepare') manager.saveModel({ ...googleEntry, googleAccounts: [account] });
+      const before = operation === 'prepare' ? fs.readFileSync(manager.store.filename, 'utf8') : undefined;
+      const result =
+        operation === 'login'
+          ? manager.googleLogin({ authMode: 'antigravity' })
+          : manager.googlePrepareAccount({ modelName: googleEntry.name, accountId: account.id, allowOnboard: true });
+      await preparing;
+      manager.googleLoginCancel();
+      expect(signal.aborted).toBe(true);
+      finish({
+        ...account,
+        project: 'cancelled-project',
+        cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+      });
+      await expect(result).rejects.toThrow(/cancelled/i);
+      if (before) expect(fs.readFileSync(manager.store.filename, 'utf8')).toBe(before);
+      else expect(fs.existsSync(manager.store.filename)).toBe(false);
+      expect(() =>
+        manager.saveModel({
+          ...googleEntry,
+          name: 'models/cancelled-result',
+          googleAccounts: [{ id: account.id, accessToken: '********' }],
+        }),
+      ).toThrow('expired or unavailable');
+    },
+  );
 
   it('cancels an active login and rejects overlapping login attempts', async () => {
     const { directory } = setup();

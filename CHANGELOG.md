@@ -2,12 +2,19 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Antigravity account sign-in and project preparation
+
+- Follow up on [issue #19](https://github.com/vahapogut/antigravity-add-model/issues/19) with **Antigravity account** sign-in using the personal-account OAuth profile from a recognized installed IDE 2.5.5 build. Preserve PKCE, state validation, cancellation and the existing custom-client option; unknown installations report an error without fallback.
+- Prepare the Cloud Code project and service endpoint after explicit Antigravity sign-in, with a **Prepare account** action for existing entries. First-time enrollment is limited to the free tier and remains subject to Google's eligibility decisions. Preserve masked credentials, encrypted storage, project and endpoint through refresh, discovery and generation.
+- Use a consistent application-owned `User-Agent` across Cloud Code preparation, catalog, quota and generation requests, fixing the catalog 403 encountered during live validation. Retain newly refreshed credentials in encrypted storage even if subsequent account preparation fails or is cancelled.
+- Verify a real account on **2026-10-14** with browser OAuth through the recognized official IDE 2.5.5 profile, project preparation, catalog access (HTTP 200, 19 models), quota access (HTTP 200), forced token refresh with encrypted persistence, and `gemini-2.5-flash` generation (HTTP 200, `OK`). Two-account HTTP 429 rotation remains verified with local fixtures only; see [validation details](docs/configuration.md#verified-google-account-flow).
+
 ### Unreleased — Local proxy security and provider onboarding
 
 - Address the security findings in [issue #17](https://github.com/vahapogut/antigravity-add-model/issues/17): validate Host/Origin on desktop and IDE proxy routes while preserving native localhost calls; bind desktop model-list forwarding to the current owned language server; restrict authenticated non-image downloads to Google API HTTPS hosts without following redirects. Keep the IDE service isolated from desktop LS origins.
 - Send credential-store diagnostics directly through the persisted logger using fixed messages without raw exceptions. Add an installer regression confirming that source maps and unrelated build files stay outside the addon. Add a [Spanish getting-started guide](README_es.md).
 - Add the optional [Workers AI setup wizard](docs/workers-ai-setup.md) suggested in [issue #18](https://github.com/vahapogut/antigravity-add-model/issues/18): use an existing token or explicitly create an account-scoped expiring token, discover/select models, encrypt saved credentials and rotate only the chosen account's entries. Read-only verification checks catalog access; setup never runs generation or creates token managers.
-- Improve [Google account-pool guidance](docs/configuration.md#google-cloud-code-account-pools) for [issue #19](https://github.com/vahapogut/antigravity-add-model/issues/19), distinguish access denial, rate limits and service unavailability without exposing provider error bodies, and make account tests use the saved model endpoint. Multiple accounts and rotation remain supported; native Antigravity login is separate and is not imported into this pool.
+- Improve [Google account-pool guidance](docs/configuration.md#google-cloud-code-account-pools) for [issue #19](https://github.com/vahapogut/antigravity-add-model/issues/19), distinguish access denial, rate limits and service unavailability without exposing provider error bodies, and make account tests use the saved model endpoint.
 
 ### Unreleased — Fallback configuration guide
 

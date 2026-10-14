@@ -2,8 +2,32 @@
 
 Choose a provider in **Settings → Models & Usage → Custom Models → Add model**.
 The preset fills the endpoint and API format; enter your provider's API key and
-an exact model ID. The optional [gateway](../gateway/README.md) has its own
+an exact model ID. **Google Cloud Code account pool** uses the account sign-in
+options [below](#google-cloud-code-accounts) instead of an API key.
+The optional [gateway](../gateway/README.md) has its own
 provider credentials and model routes.
+
+## Google Cloud Code accounts
+
+Select **Google Cloud Code account pool → Sign in with Google → Antigravity
+account** to authorize an account using the OAuth profile from a recognized
+local Antigravity IDE **2.5.5** installation. This prepares the account's Cloud
+Code project and can request eligible free-tier enrollment after browser
+consent. The **My Desktop OAuth client** option and credential-file import
+remain available.
+
+Saved accounts use encrypted credentials and support automatic pool selection.
+For imported or older entries, **Prepare account** can establish the project;
+save afterward. **Test account**, catalog discovery and **Test generation**
+verify separate steps. See [account setup and installation support](configuration.md#google-cloud-code-account-pools)
+for portable paths, permissions and troubleshooting. This account pool belongs
+to the desktop/IDE proxy; the optional gateway manages its own providers.
+
+A real account completed browser sign-in, project preparation, catalog and quota
+checks, token refresh, and `gemini-2.5-flash` generation on **2026-10-14** using
+the recognized IDE 2.5.5 build. See the [verification details](configuration.md#verified-google-account-flow).
+Two-account rate-limit switching is covered by local fixtures; live verification
+used one account.
 
 ## Browse OpenRouter models
 

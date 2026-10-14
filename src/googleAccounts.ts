@@ -5,6 +5,9 @@ import { createHash, randomInt } from 'crypto';
 import type { GoogleCooldownReason } from './googlePoolPolicy';
 import { describeGoogleAccessError, type GoogleAccessErrorCategory } from './googleAccessErrors';
 
+/** A consistent identifier for this application across Cloud Code account and generation requests. */
+export const GOOGLE_CLOUD_CODE_USER_AGENT = 'antigravity-add-model';
+
 export interface GoogleAccount {
   id: string;
   label?: string;
@@ -13,6 +16,9 @@ export interface GoogleAccount {
   expiresAt?: number;
   clientId?: string;
   clientSecret?: string;
+  authMode?: 'custom' | 'antigravity';
+  /** Origin returned by explicit account preparation; never a provider-supplied arbitrary URL. */
+  cloudCodeEndpoint?: string;
   project?: string;
   enabled?: boolean;
 }
@@ -172,6 +178,20 @@ function checkedEndpoint(value: string, hosts: string[]): URL {
   return url;
 }
 
+/** Preserve local test/custom endpoints, and use the prepared tier for official Google requests. */
+export function googleAccountEndpoint(account: GoogleAccount, configured?: string): string {
+  const official = ['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.googleapis.com'];
+  if (account.cloudCodeEndpoint !== undefined && !official.includes(account.cloudCodeEndpoint))
+    throw new GoogleAccountError('Prepared Google endpoint must be an official Cloud Code origin.', 400);
+  const selected = checkedEndpoint(
+    configured || account.cloudCodeEndpoint || official[1],
+    official.map((url) => new URL(url).hostname),
+  );
+  return account.cloudCodeEndpoint && official.includes(selected.origin)
+    ? account.cloudCodeEndpoint
+    : selected.toString();
+}
+
 async function postJson(
   url: URL,
   headers: http.OutgoingHttpHeaders,
@@ -248,7 +268,16 @@ export async function refreshGoogleAccount(
     );
   }
   const active = refreshing.get(key);
-  if (active) return active;
+  if (active) {
+    const updated = await active;
+    // Sharing a token refresh must not replace this model's prepared project or service route.
+    return {
+      ...account,
+      accessToken: updated.accessToken,
+      refreshToken: updated.refreshToken,
+      expiresAt: updated.expiresAt,
+    };
+  }
   const refresh = (async () => {
     const endpoint = checkedEndpoint(tokenEndpointOverride, ['oauth2.googleapis.com']);
     const body = new URLSearchParams({
@@ -283,17 +312,18 @@ export async function refreshGoogleAccount(
 }
 
 /** Explicit quota refresh; never infers subscription eligibility or fabricates an available quota. */
-export async function fetchGoogleQuota(
-  account: GoogleAccount,
-  baseURL = 'https://daily-cloudcode-pa.googleapis.com',
-): Promise<GoogleQuotaSnapshot> {
-  const endpoint = checkedEndpoint(baseURL, ['daily-cloudcode-pa.googleapis.com', 'cloudcode-pa.googleapis.com']);
+export async function fetchGoogleQuota(account: GoogleAccount, baseURL?: string): Promise<GoogleQuotaSnapshot> {
+  const endpoint = new URL(googleAccountEndpoint(account, baseURL));
   endpoint.pathname = '/v1internal:retrieveUserQuotaSummary';
   endpoint.search = '';
   const current = await refreshGoogleAccount(account);
   const { status, data } = await postJson(
     endpoint,
-    { 'Content-Type': 'application/json', Authorization: `Bearer ${current.accessToken}` },
+    {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${current.accessToken}`,
+      'User-Agent': GOOGLE_CLOUD_CODE_USER_AGENT,
+    },
     JSON.stringify(account.project ? { project: account.project } : {}),
   );
   if (status < 200 || status >= 300)
@@ -329,15 +359,19 @@ export async function fetchGoogleQuota(
 /** Discover only the models returned for this authenticated account/project. */
 export async function fetchGoogleModels(
   account: GoogleAccount,
-  baseURL = 'https://daily-cloudcode-pa.googleapis.com',
+  baseURL?: string,
 ): Promise<{ id: string; displayName: string }[]> {
-  const endpoint = checkedEndpoint(baseURL, ['daily-cloudcode-pa.googleapis.com', 'cloudcode-pa.googleapis.com']);
+  const endpoint = new URL(googleAccountEndpoint(account, baseURL));
   endpoint.pathname = '/v1internal:fetchAvailableModels';
   endpoint.search = '';
   const current = await refreshGoogleAccount(account);
   const { status, data } = await postJson(
     endpoint,
-    { 'Content-Type': 'application/json', Authorization: `Bearer ${current.accessToken}` },
+    {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${current.accessToken}`,
+      'User-Agent': GOOGLE_CLOUD_CODE_USER_AGENT,
+    },
     JSON.stringify(current.project ? { project: current.project } : {}),
   );
   if (status < 200 || status >= 300)

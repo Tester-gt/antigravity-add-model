@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as http from 'node:http';
 import {
   acquireGoogleAccount,
+  GOOGLE_CLOUD_CODE_USER_AGENT,
   configureGoogleAccountPersistence,
   fetchGoogleQuota,
   fetchGoogleModels,
@@ -111,6 +112,59 @@ describe('Google OAuth with user-provided app credentials', () => {
     ).rejects.toThrow(/official service/);
   });
 
+  it('coalesces token refresh without borrowing another caller’s project, endpoint or account metadata', async () => {
+    let requests = 0;
+    const endpoint = await serve((_req, res) => {
+      requests++;
+      res.end(
+        JSON.stringify({
+          access_token: 'shared-new-access',
+          refresh_token: 'shared-rotated-refresh',
+          expires_in: 3600,
+        }),
+      );
+    });
+    const credentials = { id: 'shared-profile', clientId: 'shared-app', refreshToken: 'shared-refresh', expiresAt: 1 };
+    const first: GoogleAccount = {
+      ...credentials,
+      label: 'Production',
+      authMode: 'custom',
+      project: 'first-project',
+      cloudCodeEndpoint: 'https://cloudcode-pa.googleapis.com',
+    };
+    const second: GoogleAccount = {
+      ...credentials,
+      label: 'Personal',
+      authMode: 'antigravity',
+      project: 'second-project',
+      cloudCodeEndpoint: 'https://daily-cloudcode-pa.googleapis.com',
+    };
+    const [production, personal] = await Promise.all([
+      refreshGoogleAccount(first, endpoint),
+      refreshGoogleAccount(second, endpoint),
+    ]);
+    expect(requests).toBe(1);
+    for (const [result, original] of [
+      [production, first],
+      [personal, second],
+    ]) {
+      expect(result).toMatchObject({
+        ...original,
+        accessToken: 'shared-new-access',
+        refreshToken: 'shared-rotated-refresh',
+        expiresAt: expect.any(Number),
+      });
+      expect(result.expiresAt).toBeGreaterThan(Date.now());
+    }
+    expect(await refreshGoogleAccount(second, endpoint)).toMatchObject({
+      ...second,
+      accessToken: 'shared-new-access',
+      refreshToken: 'shared-rotated-refresh',
+      expiresAt: expect.any(Number),
+    });
+    expect(requests).toBe(1);
+  });
+
   it('reports revoked credentials without returning upstream bodies or secret values', async () => {
     const endpoint = await serve((_req, res) => {
       res.writeHead(400);
@@ -129,6 +183,35 @@ describe('Google OAuth with user-provided app credentials', () => {
 });
 
 describe('Google account selection and quota', () => {
+  it.each(['quota', 'models'] as const)('identifies this application when requesting Cloud Code %s', async (kind) => {
+    let receivedUserAgent: string | undefined;
+    const endpoint = await serve((req, res) => {
+      receivedUserAgent = req.headers['user-agent'];
+      if (receivedUserAgent !== 'antigravity-add-model') {
+        res.writeHead(403);
+        res.end('{}');
+        return;
+      }
+      res.end(
+        JSON.stringify(
+          kind === 'quota'
+            ? { buckets: [{ id: 'fixture', remainingFraction: 1 }] }
+            : { models: { 'fixture-model': { displayName: 'Fixture' } } },
+        ),
+      );
+    });
+    expect(GOOGLE_CLOUD_CODE_USER_AGENT).toBe('antigravity-add-model');
+    if (kind === 'quota')
+      await expect(fetchGoogleQuota(account('user-agent'), endpoint)).resolves.toMatchObject({
+        buckets: [{ id: 'fixture', remainingFraction: 1 }],
+      });
+    else
+      await expect(fetchGoogleModels(account('user-agent'), endpoint)).resolves.toEqual([
+        { id: 'fixture-model', displayName: 'Fixture' },
+      ]);
+    expect(receivedUserAgent).toBe(GOOGLE_CLOUD_CODE_USER_AGENT);
+  });
+
   it.each([
     [401, 'authentication', /Reconnect this account/],
     [403, 'access-denied', /account\/project permissions and service eligibility/],

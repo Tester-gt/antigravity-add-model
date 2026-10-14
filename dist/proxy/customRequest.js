@@ -337,10 +337,13 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                             throw new Error('Unsupported endpoint protocol');
                         headers = registry.getProviderHeaders(model.provider, cloudCode ? '' : model.apiKey, format);
                         if (accountLease) {
+                            url = new URL((0, googleAccounts_1.googleAccountEndpoint)(accountLease.account, model.apiUrl));
+                            if (accountLease.account.authMode === 'antigravity' && !accountLease.account.project)
+                                throw new Error('Prepare this Antigravity account in the model manager before generating a response');
                             url.pathname = `/v1internal:${isStream ? 'streamGenerateContent' : 'generateContent'}`;
                             url.search = isStream ? '?alt=sse' : '';
                             headers.Authorization = `Bearer ${accountLease.account.accessToken}`;
-                            headers['User-Agent'] = 'antigravity';
+                            headers['User-Agent'] = googleAccounts_1.GOOGLE_CLOUD_CODE_USER_AGENT;
                             const project = accountLease.account.project || model.googleProject;
                             payload = { model: externalName, ...(project ? { project } : {}), request: payload };
                         }

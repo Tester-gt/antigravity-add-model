@@ -1,5 +1,6 @@
 import { ModelStore, ModelEntry, SecretCodec } from './modelStore';
 import { loginGoogleAccount, GoogleLoginOptions } from './googleOAuth';
+import { prepareGoogleAccount } from './googleOnboarding';
 import { GoogleAccount, GooglePoolOptions, refreshGoogleAccount, fetchGoogleQuota } from './googleAccounts';
 export interface ProbeParams {
     name?: string;
@@ -34,12 +35,13 @@ export declare function requestJson(urlValue: string, headers?: Record<string, s
     data: unknown;
 }>;
 export declare function modelListUrl(apiUrl: string, format: string, provider?: string): string;
-export declare function createModelManager(directory: string, codec: SecretCodec, openExternal: (url: string) => Promise<unknown>, dependencies?: {
+export declare function createModelManager(directory: string, codec: SecretCodec, openExternal: (url: string) => Promise<unknown>, overrides?: Partial<{
     loginGoogleAccount: typeof loginGoogleAccount;
     refreshGoogleAccount: typeof refreshGoogleAccount;
     fetchGoogleQuota: typeof fetchGoogleQuota;
+    prepareGoogleAccount: typeof prepareGoogleAccount;
     now: () => number;
-}): {
+}>): {
     store: ModelStore;
     saveModel: (model: ModelEntry) => {
         success: boolean;
@@ -92,6 +94,16 @@ export declare function createModelManager(directory: string, codec: SecretCodec
             quota: import("./googleAccounts").GoogleQuotaSnapshot;
         }[];
     };
+    googlePrepareAccount(input: {
+        modelName?: string;
+        accountId?: string;
+        account?: GoogleAccount;
+        allowOnboard?: boolean;
+    }): Promise<{
+        success: boolean;
+        account: GoogleAccount;
+        message: string;
+    }>;
     googleTestAccount(input: {
         modelName?: string;
         accountId?: string;

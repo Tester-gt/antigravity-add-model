@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { loginGoogleAccount, GOOGLE_AUTHORIZATION_URL, GOOGLE_TOKEN_URL } from '../googleOAuth';
+import { GOOGLE_NATIVE_SCOPES } from '../googleNativeClient';
 
 const clientId = 'unit-test-client.apps.googleusercontent.com';
 const tokenResponse = { access_token: 'test-access', refresh_token: 'test-refresh', expires_in: 120 };
@@ -32,13 +33,18 @@ function request(url: string, method = 'GET'): Promise<{ status: number; body: s
 function makeAttempt(
   options: Parameters<typeof loginGoogleAccount>[0] = { clientId },
   exchange = vi.fn(async () => tokenResponse),
+  resolveNativeClient?: Parameters<typeof loginGoogleAccount>[2]['resolveNativeClient'],
 ) {
   let opened!: (value: URL) => void;
   const authorization = new Promise<URL>((done) => (opened = done));
   const openExternal = vi.fn(async (url: string) => {
     opened(new URL(url));
   });
-  const result = loginGoogleAccount(options, openExternal, { exchangeToken: exchange, now: () => 1000000 });
+  const result = loginGoogleAccount(options, openExternal, {
+    exchangeToken: exchange,
+    now: () => 1000000,
+    resolveNativeClient,
+  });
   // Failure cases must have a rejection handler before triggering abort/denial.
   void result.catch(() => {});
   return { authorization, result, exchange, openExternal };
@@ -54,6 +60,89 @@ function callback(authorization: URL, params: Record<string, string> = {}): stri
 }
 
 describe('explicit Google desktop OAuth', () => {
+  const nativeClient = {
+    clientId: 'fixture-native.apps.googleusercontent.com',
+    clientSecret: 'GOCSPX-fixture-native',
+    scopes: [...GOOGLE_NATIVE_SCOPES],
+  };
+
+  it('uses the recognized native personal profile, vendor callback, account choice, state and PKCE', async () => {
+    const resolveNativeClient = vi.fn(() => nativeClient);
+    const attempt = makeAttempt(
+      { authMode: 'antigravity', clientId: 'ignored-invalid-custom-id', clientSecret: 'ignored-secret' },
+      vi.fn(async () => tokenResponse),
+      resolveNativeClient,
+    );
+    const auth = await attempt.authorization;
+    const redirect = new URL(auth.searchParams.get('redirect_uri')!);
+    expect(resolveNativeClient).toHaveBeenCalledOnce();
+    expect(auth.searchParams.get('client_id')).toBe(nativeClient.clientId);
+    expect(auth.searchParams.get('scope')).toBe(nativeClient.scopes.join(' '));
+    expect(auth.searchParams.get('prompt')).toBe('select_account consent');
+    expect(auth.searchParams.get('access_type')).toBe('offline');
+    expect(auth.searchParams.has('client_secret')).toBe(false);
+    expect(redirect.hostname).toBe('localhost');
+    expect(redirect.pathname).toBe('/oauth-callback');
+    expect(Number(redirect.port)).toBeGreaterThan(0);
+    expect((await request(callback(auth, { state: 'invalid' }))).status).toBe(400);
+    const wrongPath = new URL(callback(auth));
+    wrongPath.pathname = '/oauth2callback';
+    expect((await request(wrongPath.toString())).status).toBe(404);
+    expect(attempt.exchange).not.toHaveBeenCalled();
+    const response = await request(callback(auth));
+    expect(response.status).toBe(200);
+    expect(response.body).not.toMatch(/test-access|test-refresh|GOCSPX/);
+    const parameters = attempt.exchange.mock.calls[0][0] as URLSearchParams;
+    expect(parameters.get('client_id')).toBe(nativeClient.clientId);
+    expect(parameters.get('client_secret')).toBe(nativeClient.clientSecret);
+    expect(parameters.get('redirect_uri')).toBe(redirect.toString());
+    expect(createHash('sha256').update(parameters.get('code_verifier')!).digest('base64url')).toBe(
+      auth.searchParams.get('code_challenge'),
+    );
+    expect(await attempt.result).toMatchObject({
+      authMode: 'antigravity',
+      clientId: nativeClient.clientId,
+      clientSecret: nativeClient.clientSecret,
+      accessToken: 'test-access',
+      refreshToken: 'test-refresh',
+    });
+  });
+
+  it('never opens a browser or silently falls back when the native profile is unavailable', async () => {
+    const open = vi.fn();
+    const exchange = vi.fn();
+    await expect(
+      loginGoogleAccount({ authMode: 'antigravity', clientId }, open, {
+        exchangeToken: exchange,
+        resolveNativeClient: () => {
+          throw new Error('Supported native installation is unavailable');
+        },
+      }),
+    ).rejects.toThrow('native installation is unavailable');
+    expect(open).not.toHaveBeenCalled();
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it('cancels native login and rejects unsupported auth modes before resolving a profile', async () => {
+    const resolver = vi.fn(() => nativeClient);
+    const controller = new AbortController();
+    const attempt = makeAttempt(
+      { authMode: 'antigravity', signal: controller.signal },
+      vi.fn(async () => tokenResponse),
+      resolver,
+    );
+    const auth = await attempt.authorization;
+    controller.abort();
+    await expect(attempt.result).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(request(callback(auth))).rejects.toThrow();
+    const open = vi.fn();
+    await expect(
+      loginGoogleAccount({ authMode: 'other' as 'custom' }, open, { resolveNativeClient: resolver }),
+    ).rejects.toThrow('Choose Antigravity');
+    expect(open).not.toHaveBeenCalled();
+    expect(resolver).toHaveBeenCalledOnce();
+  });
+
   it.each([
     [403, /OAuth client, consent\/test users/],
     [429, /rate or quota limit/],
