@@ -153,9 +153,14 @@ node scripts/update-preflight.mjs check --resources "C:\path\to\Antigravity\reso
 This read-only check verifies managed restore data and lists matching Windows
 process IDs, names and executable paths. It also reports other Antigravity
 installations and processes whose executable identity could not be checked.
+For IDE installations, it reads the actual mutex name from vendor metadata and
+checks the application, setup and update-readiness mutexes in the current
+Windows session. This also detects a setup process running from a temporary
+directory that would not appear in the application process list. The probe only
+opens existing handles for inspection; it never creates or releases a mutex.
 It does not inspect every Windows file lock or guarantee that an installer will
-succeed. Close the application and its language server normally. Then prepare
-the same installation:
+succeed. Close the application and its language server normally, and finish or
+cancel any existing installer before preparing the same installation:
 
 ```powershell
 node scripts/update-preflight.mjs prepare --resources "C:\path\to\Antigravity\resources"
@@ -172,24 +177,48 @@ and `ide:launch`; do not select a different profile just to bypass a conflict.
 
 Preparation restores only verified managed changes, stops the authenticated
 owned proxy, and preserves saved models and credentials. It refuses active or
-unverifiable process blockers, changed installations and invalid backups. It
+unverifiable process/mutex blockers, changed installations and invalid backups.
+It checks processes and mutexes again after backup verification, immediately
+before restoration, so an application restarted during inspection is caught. It
 does not kill processes, disable the updater, run the installer, or overwrite
 a partially updated installation with an old archive. Automatic preparation
-requires Windows process inspection; a failed inspection leaves files alone.
+requires Windows process inspection and, for the IDE, mutex inspection; a failed
+inspection leaves files alone.
+
+Proxy shutdown drains connections for up to 1.5 seconds by default, then closes
+unfinished client and upstream connections owned by the proxy. The legacy desktop runtime signals
+its language server while the proxy drains, preventing an unfinished language
+server request from holding quit open, and cancels startup if quit arrives before
+the language server launches. If `proxy:stop` cannot authenticate the
+service but its recorded process or run-lock process is still alive or cannot
+be inspected, it now reports an error instead of claiming the service stopped.
+After authenticated shutdown, it also waits for the recorded process to exit.
+That error does not authorize killing an unrelated process or deleting its lock.
 
 Run the official installer manually after successful preparation. Rebuild and
 recheck compatibility before applying the addon to the new version. If the
 installer still fails, report the product, current/target versions, installer
 filename, installation method, diagnostic output and exact installer error/log.
-Redact personal paths and credentials. The original reported installer hang
-has not yet been reproduced; this recovery command is not proof of its cause.
+Redact personal paths and credentials. The reporter's persistent failure after
+a Windows restart has not been reproduced; the verified shutdown and diagnostic
+fixes below do not establish that failure's cause.
 
 Live Windows validation on **2026-10-15** used an isolated official IDE 2.5.5
 profile. Inspection identified its running processes; after the IDE was closed,
 preparation restored its managed endpoint setting and stopped the production
-owned proxy. Fixture tests cover standalone ASAR restoration, changed or damaged
-backups, process blockers, and unrelated listeners. The vendor installer itself
-was not run in this validation.
+owned proxy. A follow-up used the signed official IDE 2.5.5 installer without
+installing anything: with an isolated IDE process running, setup displayed the
+close-application warning; after that test process exited, setup advanced to the
+license screen. While only setup remained open, the previous preflight reported
+ready with an empty application process list, but the new preflight detected the
+setup mutex and refused preparation without changes. After canceling setup, all
+three mutexes were absent and inspection passed. The updated preparation command
+also restored the isolated IDE settings and stopped the production proxy with an
+incomplete authenticated request open; saved model data was preserved and the
+recorded proxy process had exited. This checks the installer gate and addon
+recovery, not a complete version upgrade. Regression tests also cover unfinished TCP
+requests, a process restarting during inspection, unresponsive service records,
+standalone ASAR restoration, damaged backups, and unrelated listeners.
 
 ## Optional Windows language-server endpoint patch
 

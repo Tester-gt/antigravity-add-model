@@ -13,6 +13,7 @@ import { serviceCommand } from './desktop-service.mjs';
 const exec = promisify(execFile);
 const usage = 'Use update-preflight.mjs check|prepare --resources PATH [--settings FILE] [--data-dir DIR] [--json]';
 const candidateName = /^(?:antigravity(?: ide)?|language_server(?:_[a-z0-9_]+)?)\.exe$/i;
+const mutexName = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 function fail(code, message) { throw Object.assign(new Error(`${code}: ${message}`), { code }); }
 
 export function parseUpdateArgs(args) {
@@ -47,11 +48,101 @@ export function inspectUpdateInstallation(options) {
   if (fs.existsSync(path.join(resources, 'app', 'out'))) {
     const report = configureIde({ ...options, resources, action: 'status' });
     if (report.status === 'conflict') fail('RESTORE_REFUSED', 'The managed IDE endpoint was changed outside this adapter. Resolve that settings conflict before preparation.');
+    const metadata = path.join(resources, 'app', 'product.json');
+    noLinks(metadata);
+    if (fs.statSync(metadata).size > 1024 * 1024) fail('MUTEX_METADATA_INVALID', 'IDE product metadata is oversized. No mutex names were guessed.');
+    const product = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+    if (typeof product.win32MutexName !== 'string' || !mutexName.test(product.win32MutexName))
+      fail('MUTEX_METADATA_INVALID', 'IDE product metadata has no valid win32MutexName. No mutex names were guessed.');
+    // These names come from the vendor runtime's installMutex, checkInnoSetupMutex,
+    // and Windows background-update readiness check. Do not infer names from an exe.
+    const mutexNames = [product.win32MutexName, `${product.win32MutexName}setup`, `${product.win32MutexName}-ready`];
     return { kind: 'ide', installation, resources, version: report.ideVersion || report.version,
-      settings: report.settings, status: report.applied ? 'managed' : 'unmanaged' };
+      settings: report.settings, status: report.applied ? 'managed' : 'unmanaged', mutexNames };
   }
   const report = inspectForUpdate({ ...options, resources });
   return { kind: 'standalone', installation, ...report };
+}
+
+function validateMutexProbe(names, items) {
+  if (!Array.isArray(items) || items.length !== names.length || !items.every((item, index) =>
+    item?.name === names[index] && ['present', 'absent', 'unverifiable'].includes(item.status) &&
+    (item.status === 'unverifiable'
+      ? Number.isInteger(item.errorCode) && item.errorCode >= 0
+      : item.errorCode === undefined))) {
+    fail('MUTEX_CHECK_UNAVAILABLE', 'Windows mutex inspection returned an invalid or incomplete result.');
+  }
+  return items.map(({ name, status, errorCode }) => ({ name, status, ...(errorCode === undefined ? {} : { errorCode }) }));
+}
+
+/** Read existing named objects without creating, acquiring or releasing any mutex. */
+export async function probeWindowsMutexes(names, options = {}) {
+  if ((options.platform || process.platform) !== 'win32') fail('MUTEX_CHECK_UNAVAILABLE', 'Automatic mutex checks are Windows-only.');
+  if (!Array.isArray(names) || names.length < 1 || names.length > 3 ||
+      names.some(name => typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,133}$/i.test(name)) || new Set(names).size !== names.length)
+    fail('MUTEX_METADATA_INVALID', 'Refusing invalid or duplicate mutex names.');
+  const systemRoot = options.env?.SystemRoot || process.env.SystemRoot || 'C:\\Windows';
+  const powershell = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  // Names are validated above, including exclusion of quotes and PowerShell syntax.
+  // ERROR_FILE_NOT_FOUND is the only absence result; access denied and unexpected
+  // object types remain unverifiable. SYNCHRONIZE requests no mutation rights.
+  const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AntigravityUpdateMutexProbe {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr OpenMutexW(uint access, bool inheritHandle, string name);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool CloseHandle(IntPtr handle);
+}
+'@;
+$results = @(foreach ($mutexName in @(${names.map(name => `'${name}'`).join(',')})) {
+  $handle = [AntigravityUpdateMutexProbe]::OpenMutexW(0x00100000, $false, $mutexName);
+  $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error();
+  if ($handle -ne [IntPtr]::Zero) {
+    try { @{name=$mutexName; status='present'} } finally {
+      if (-not [AntigravityUpdateMutexProbe]::CloseHandle($handle)) { throw 'Could not close the diagnostic mutex handle.' }
+    }
+  } elseif ($errorCode -eq 2) { @{name=$mutexName; status='absent'} }
+  else { @{name=$mutexName; status='unverifiable'; errorCode=$errorCode} }
+});
+ConvertTo-Json -InputObject $results -Compress`;
+  try {
+    const { stdout } = await (options.exec || exec)(powershell, ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
+      { windowsHide: true, timeout: 15000, maxBuffer: 64 * 1024, encoding: 'utf8' });
+    return validateMutexProbe(names, JSON.parse(stdout.replace(/^\ufeff/, '').trim()));
+  } catch {
+    fail('MUTEX_CHECK_UNAVAILABLE', 'Windows mutex inspection failed. No mutex was created, acquired or forcibly released.');
+  }
+}
+
+async function inspectUpdateBlockers(installation, options, hooks) {
+  const [processResult, mutexResult] = await Promise.allSettled([
+    (async () => classifyUpdateProcesses(installation.installation, await (hooks.listProcesses || listWindowsProcesses)(options), options))(),
+    installation.kind === 'ide'
+      ? (async () => validateMutexProbe(installation.mutexNames,
+          await (hooks.probeMutexes || probeWindowsMutexes)(installation.mutexNames, options)))()
+      : Promise.resolve([]),
+  ]);
+  const processes = processResult.status === 'fulfilled' ? processResult.value : undefined;
+  const processError = processResult.status === 'rejected' ? processResult.reason.message : undefined;
+  const mutexes = mutexResult.status === 'rejected'
+    ? { status: 'unavailable', items: [], error: mutexResult.reason.message }
+    : { status: installation.kind === 'ide' ? 'checked' : 'not-applicable', items: mutexResult.value };
+  const blocked = Boolean(processError || processes.matching.length || processes.otherInstallations.length || processes.unverifiable.length ||
+    mutexes.status === 'unavailable' || mutexes.items.some(item => item.status !== 'absent'));
+  return { processes, processError, mutexes, readyForPreparation: !blocked };
+}
+
+function requireNoBlockers(snapshot) {
+  if (snapshot.readyForPreparation) return;
+  const reason = snapshot.processError || snapshot.mutexes.error ||
+    (snapshot.mutexes.items.some(item => item.status !== 'absent')
+      ? 'An IDE or installer mutex is present or unverifiable. Close the app or finish/cancel the existing official installer normally; do not forcibly release its mutex.'
+      : 'Close the listed app/language-server processes, including other installations that may hold a shared updater mutex; unknown executable identities must be resolved manually.');
+  fail('PREPARE_BLOCKED', `${reason} Run update-preflight.mjs check --resources PATH --json for details. No files changed and no proxy was stopped.`);
 }
 
 /** Enumerate executable identity only; command lines may contain credentials. */
@@ -103,22 +194,19 @@ export async function updatePreflight(options, hooks = {}) {
   // Verify manifests, current files and backups before either restoration or service shutdown.
   const installation = inspectUpdateInstallation(options);
   const dataDirectory = path.resolve(options.dataDirectory || path.join(os.homedir(), '.gemini', 'antigravity'));
-  let processes;
-  let processError;
-  try {
-    const inventory = await (hooks.listProcesses || listWindowsProcesses)(options);
-    processes = classifyUpdateProcesses(installation.installation, inventory, options);
-  } catch (error) { processError = error.message; }
-  // Another installation can still hold the vendor's application-wide updater mutex.
-  const blockers = processError || processes.matching.length || processes.otherInstallations.length || processes.unverifiable.length;
-  const report = { command, installation, dataDirectory, processes, processError,
-    readyForPreparation: !blockers, actions: [],
-    guidance: 'This checks addon recovery and process identity, not every Windows file lock. If the official installer still fails, share the product/version, installer filename, this report and its installer log; redact personal paths and credentials.' };
+  const snapshot = await inspectUpdateBlockers(installation, options, hooks);
+  const report = { command, installation, dataDirectory, ...snapshot, actions: [],
+    guidance: 'This checks addon recovery, process identity and known IDE mutexes in the current Windows session, not every Windows file lock. If the official installer still fails, share the product/version, installer filename, this report and its installer log; redact personal paths and credentials.' };
   if (command === 'check') return report;
-  if (blockers) fail('PREPARE_BLOCKED', `${processError || 'Close the listed app/language-server processes, including other installations that may hold a shared updater mutex; unknown executable identities must be resolved manually.'} Run update:check -- --resources PATH --json for details. No files changed and no proxy was stopped.`);
+  requireNoBlockers(snapshot);
   // Re-inspect immediately before writing; adapters additionally check their own transaction state.
   const fresh = inspectUpdateInstallation(options);
   if (JSON.stringify(fresh) !== JSON.stringify(installation)) fail('INSTALLATION_CHANGED', 'Installation changed during inspection; retry.');
+  // Backup verification can be slow. A restarted IDE or installer invalidates the
+  // first snapshot, so check again after verification and immediately before writes.
+  const freshSnapshot = await inspectUpdateBlockers(fresh, options, hooks);
+  requireNoBlockers(freshSnapshot);
+  Object.assign(report, freshSnapshot);
   if (installation.status === 'managed') {
     const result = installation.kind === 'ide'
       ? configureIde({ ...options, resources: installation.resources, settings: installation.settings, action: 'restore' })

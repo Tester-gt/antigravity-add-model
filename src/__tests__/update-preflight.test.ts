@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as asar from '@electron/asar';
 import { deploy, fingerprint, REQUIRED_BUILD_FILES } from '../../scripts/deploy.mjs';
 import { configureIde } from '../../scripts/ide.mjs';
-import { classifyUpdateProcesses, inspectUpdateInstallation, listWindowsProcesses, parseUpdateArgs, updatePreflight } from '../../scripts/update-preflight.mjs';
+import { classifyUpdateProcesses, inspectUpdateInstallation, listWindowsProcesses, parseUpdateArgs, probeWindowsMutexes, updatePreflight } from '../../scripts/update-preflight.mjs';
 
 vi.setConfig({ testTimeout: 20000 });
 const roots: string[] = [];
@@ -21,7 +21,7 @@ function ide() {
   const resources = path.join(directory, 'Antigravity IDE/resources');
   const app = path.join(resources, 'app');
   put(path.join(app, 'package.json'), JSON.stringify({ main: 'out/main.js', version: '1.107.0' }));
-  put(path.join(app, 'product.json'), JSON.stringify({ nameShort: 'Antigravity IDE', applicationName: 'antigravity-ide', ideVersion: '2.5.5' }));
+  put(path.join(app, 'product.json'), JSON.stringify({ nameShort: 'Antigravity IDE', applicationName: 'antigravity-ide', ideVersion: '2.5.5', win32MutexName: 'antigravity-fixture' }));
   put(path.join(app, 'out/main.js'), '// unchanged vendor runtime');
   put(path.join(app, 'extensions/antigravity/package.json'), JSON.stringify({ contributes: { configuration: { properties: { 'jetski.cloudCodeUrl': { type: 'string' } } } } }));
   const settings = path.join(directory, 'profile/User/settings.json');
@@ -48,7 +48,11 @@ async function standalone() {
   put(path.join(dataDirectory, 'custom_models.json'), 'keep credentials');
   return { root: directory, resources, dist, dataDirectory, platform: 'win32' };
 }
-const quiet = () => ({ listProcesses: vi.fn(async () => []), serviceCommand: vi.fn(async () => ({ status: 'stopped' })) });
+const quiet = () => ({
+  listProcesses: vi.fn(async () => []),
+  probeMutexes: vi.fn(async (names: string[]) => names.map(name => ({ name, status: 'absent' }))),
+  serviceCommand: vi.fn(async () => ({ status: 'stopped' })),
+});
 
 afterEach(() => {
   asar.uncacheAll();
@@ -154,6 +158,100 @@ describe('Windows update recovery', () => {
     expect(run.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true, timeout: 15000 });
   });
 
+  it('derives only the IDE runtime mutex names from validated product metadata', () => {
+    const f = ide();
+    expect(inspectUpdateInstallation(f).mutexNames).toEqual(['antigravity-fixture', 'antigravity-fixturesetup', 'antigravity-fixture-ready']);
+    const filename = path.join(f.resources, 'app/product.json');
+    const product = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    for (const value of [undefined, '', "x'; Write-Output secret; '", 'Global\\other', 'a'.repeat(129), 123]) {
+      put(filename, JSON.stringify({ ...product, win32MutexName: value }));
+      expect(() => inspectUpdateInstallation(f)).toThrow('MUTEX_METADATA_INVALID');
+    }
+  });
+
+  it('reports IDE/setup/readiness mutex blockers without any matching process or mutation', async () => {
+    const f = ide(); configureIde({ ...f, action: 'apply' });
+    const before = fs.readFileSync(f.settings);
+    for (const index of [0, 1, 2]) {
+      const hooks = quiet();
+      hooks.probeMutexes.mockImplementation(async names => names.map((name, i) => ({ name, status: i === index ? 'present' : 'absent' })));
+      const report = await updatePreflight({ ...f, command: 'check' }, hooks);
+      expect(report).toMatchObject({ readyForPreparation: false, processes: { matching: [] }, mutexes: { status: 'checked' } });
+      expect(report.mutexes.items[index].status).toBe('present');
+      await expect(updatePreflight({ ...f, command: 'prepare' }, hooks)).rejects.toThrow('installer mutex');
+      expect(fs.readFileSync(f.settings)).toEqual(before);
+      expect(hooks.serviceCommand).not.toHaveBeenCalled();
+    }
+  });
+
+  it('fails closed for unavailable, inaccessible and invalid mutex probes', async () => {
+    const f = ide(); configureIde({ ...f, action: 'apply' });
+    const before = fs.readFileSync(f.settings);
+    for (const problem of ['denied', 'failure', 'empty', 'duplicate', 'unknown-status', 'missing-error']) {
+      const hooks = quiet();
+      hooks.probeMutexes.mockImplementation(async names => {
+        if (problem === 'failure') throw new Error('PowerShell unavailable');
+        if (problem === 'empty') return [];
+        return names.map((name, i) => ({
+          name: problem === 'duplicate' ? names[0] : name,
+          status: problem === 'unknown-status' ? 'clear' : i === 0 ? 'unverifiable' : 'absent',
+          ...(i === 0 && problem !== 'missing-error' ? { errorCode: 5 } : {}),
+        }));
+      });
+      expect((await updatePreflight({ ...f, command: 'check' }, hooks)).readyForPreparation).toBe(false);
+      await expect(updatePreflight({ ...f, command: 'prepare' }, hooks)).rejects.toThrow('PREPARE_BLOCKED');
+      expect(fs.readFileSync(f.settings)).toEqual(before);
+      expect(hooks.serviceCommand).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rechecks process and mutex state after backup inspection before any write', async () => {
+    for (const blocker of ['process', 'mutex', 'probe-failure']) {
+      const f = ide(); configureIde({ ...f, action: 'apply' });
+      const before = fs.readFileSync(f.settings);
+      const hooks = quiet();
+      if (blocker === 'process') hooks.listProcesses.mockResolvedValueOnce([]).mockResolvedValueOnce([
+        { pid: 123, name: 'Antigravity IDE.exe', executable: f.executable },
+      ] as never);
+      else if (blocker === 'probe-failure') hooks.probeMutexes.mockImplementationOnce(async names => names.map(name => ({ name, status: 'absent' })))
+        .mockRejectedValueOnce(new Error('Probe became unavailable'));
+      else hooks.probeMutexes.mockImplementationOnce(async names => names.map(name => ({ name, status: 'absent' })))
+        .mockImplementationOnce(async names => names.map((name, i) => ({ name, status: i === 1 ? 'present' : 'absent' })));
+      await expect(updatePreflight({ ...f, command: 'prepare' }, hooks)).rejects.toThrow('PREPARE_BLOCKED');
+      expect(hooks.listProcesses).toHaveBeenCalledTimes(2);
+      expect(hooks.probeMutexes).toHaveBeenCalledTimes(2);
+      expect(fs.readFileSync(f.settings)).toEqual(before);
+      expect(hooks.serviceCommand).not.toHaveBeenCalled();
+    }
+  });
+
+  it('opens existing mutexes read-only and validates the complete bounded probe response', async () => {
+    const names = ['antigravity-fixture', 'antigravity-fixturesetup', 'antigravity-fixture-ready'];
+    const result = names.map((name, i) => ({ name, status: i === 0 ? 'present' : i === 1 ? 'absent' : 'unverifiable', ...(i === 2 ? { errorCode: 5 } : {}) }));
+    const run = vi.fn(async () => ({ stdout: JSON.stringify(result) }));
+    expect(await probeWindowsMutexes(names, { platform: 'win32', exec: run })).toEqual(result);
+    const args = run.mock.calls[0]?.[1] as string[];
+    const script = args.at(-1)!;
+    expect(script).toContain('OpenMutexW(0x00100000');
+    expect(script).toContain('CloseHandle($handle)');
+    expect(script).not.toMatch(/CreateMutex|ReleaseMutex|WaitFor|CommandLine|Stop-Process/);
+    expect(args).toContain('Hidden');
+    expect(run.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true, timeout: 15000 });
+    for (const value of [[], [{ name: names[0], status: 'absent' }], 'not json']) {
+      run.mockResolvedValueOnce({ stdout: typeof value === 'string' ? value : JSON.stringify(value) });
+      await expect(probeWindowsMutexes(names, { platform: 'win32', exec: run })).rejects.toThrow('MUTEX_CHECK_UNAVAILABLE');
+    }
+    await expect(probeWindowsMutexes(["bad'; name"], { platform: 'win32', exec: run })).rejects.toThrow('MUTEX_METADATA_INVALID');
+    await expect(probeWindowsMutexes([names[0], names[0]], { platform: 'win32', exec: run })).rejects.toThrow('MUTEX_METADATA_INVALID');
+    await expect(probeWindowsMutexes(names, { platform: 'linux', exec: run })).rejects.toThrow('MUTEX_CHECK_UNAVAILABLE');
+  });
+
+  it.skipIf(process.platform !== 'win32')('can read absence of a unique Windows mutex without creating it', async () => {
+    const name = `antigravity-test-${randomUUID()}`;
+    expect(await probeWindowsMutexes([name])).toEqual([{ name, status: 'absent' }]);
+    expect(await probeWindowsMutexes([name])).toEqual([{ name, status: 'absent' }]);
+  });
+
   it('rejects corrupted IDE backups and external endpoint conflicts before service shutdown', async () => {
     for (const problem of ['backup', 'malformed-backup', 'endpoint']) {
       const f = ide(); configureIde({ ...f, action: 'apply' });
@@ -177,6 +275,8 @@ describe('Windows update recovery', () => {
     const f = await standalone(); const before = fingerprint(f.resources); const hooks = quiet();
     const report = await updatePreflight({ ...f, command: 'prepare' }, hooks);
     expect(report.actions).toEqual([{ action: 'proxy', status: 'stopped' }]);
+    expect(report.mutexes).toEqual({ status: 'not-applicable', items: [] });
+    expect(hooks.probeMutexes).not.toHaveBeenCalled();
     expect(report.guidance).toContain('no application or settings files were restored');
     expect(fingerprint(f.resources)).toEqual(before);
     const i = ide(); configureIde({ ...i, action: 'apply' }); configureIde({ ...i, action: 'restore' });
@@ -222,7 +322,7 @@ describe('Windows update recovery', () => {
     try {
       const address = server.address() as { port: number };
       put(path.join(f.dataDirectory, '.ide-proxy/state.json'), JSON.stringify({ version: 1, token: 'a'.repeat(64), instance: randomUUID(), pid: process.pid, port: address.port }));
-      await updatePreflight({ ...f, command: 'prepare' }, { listProcesses: async () => [] });
+      await expect(updatePreflight({ ...f, command: 'prepare' }, { ...quiet(), serviceCommand: undefined })).rejects.toThrow('PROXY_STOP_FAILED');
       expect(stops).toBe(0);
       expect(server.listening).toBe(true);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

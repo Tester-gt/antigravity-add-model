@@ -2,6 +2,13 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Windows update blockers and bounded shutdown
+
+- Follow up on [issue #22](https://github.com/vahapogut/antigravity-add-model/issues/22): bound the proxy's shutdown drain, cancel its unfinished upstream requests, and signal the legacy desktop language server concurrently. Cancel pending language-server startup when shutdown begins, so unfinished requests or a late spawn cannot leave that quit path hanging.
+- Detect the IDE's actual application, installer and update-readiness mutexes with a read-only Windows probe. Recheck processes and mutexes after backup verification, before restoring files or settings.
+- Refuse to report proxy shutdown as successful when an unresponsive service still has a live or uninspectable recorded process; wait for process exit after authenticated shutdown. Preserve unresolved records and never forcibly terminate a process from the service CLI. Avoid sending stale management credentials when the recorded owner has exited.
+- Verify the official IDE 2.5.5 installer's running-app gate and the missed setup-mutex defect on Windows: the old preflight reported ready while setup remained open; the new preflight blocked preparation, then passed after setup was canceled. No installation was performed. The reporter's failure persisting after reboot still needs their installation details; see [verification and recovery](docs/compatibility.md#windows-installer-asks-to-close-antigravity).
+
 ### Unreleased — Native checkpoint threshold and Windows update preparation
 
 - Address [issue #21](https://github.com/vahapogut/antigravity-add-model/issues/21) with an optional per-model **Compaction threshold (%)**. Preserve actual model capacity, reserve output space, and apply the same validated native settings through the proxy catalog and desktop fallback. Blank settings retain native defaults; see the [85k example](docs/configuration.md#compaction-threshold).

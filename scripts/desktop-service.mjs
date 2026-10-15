@@ -61,7 +61,8 @@ function readState(options) {
       !Number.isInteger(value.port) ||
       value.port < 1 ||
       value.port > 65535 ||
-      !Number.isInteger(value.pid)
+      !Number.isInteger(value.pid) ||
+      value.pid < 1
     )
       throw new Error('Invalid service state');
     return value;
@@ -113,6 +114,29 @@ async function health(state) {
     value.port === state.port
   );
 }
+function processMayBeAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // Access-denied and other inconclusive probes must not be mistaken for an exited process.
+    return error.code !== 'ESRCH';
+  }
+}
+function readRunLock(options) {
+  const lock = path.join(files(options).directory, 'run.lock');
+  try {
+    const stat = fs.lstatSync(lock);
+    if (stat.isSymbolicLink()) throw new Error('Refusing linked service lock');
+    if (!stat.isFile() || stat.size > 32) throw new Error('Invalid service lock; inspect it before removal');
+    const pid = Number(fs.readFileSync(lock, 'utf8'));
+    if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid service lock; inspect it before removal');
+    return pid;
+  } catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
 function description(state, includeManagement = false) {
   const endpoint = `http://127.0.0.1:${state.port}`;
   return {
@@ -153,12 +177,21 @@ export async function serviceCommand(options) {
   const initial = readState(options);
   if (options.command === 'status') return (await health(initial)) ? description(initial) : { status: 'stopped' };
   if (options.command === 'stop') {
-    if (!(await health(initial))) return { status: 'stopped', message: 'No owned service is responding' };
+    // Do not send a stale management credential to a port after its recorded owner exited.
+    if (!initial || !processMayBeAlive(initial.pid) || !(await health(initial))) {
+      const lockPid = readRunLock(options);
+      // Missing health can mean shutdown is hung, or that a stale PID was reused. It does not
+      // authorize terminating that PID, nor prove that an installer can replace its files.
+      if ([initial?.pid, lockPid].some((pid) => pid !== undefined && processMayBeAlive(pid)))
+        throw new Error('Service shutdown could not be verified: a recorded process is still alive or inaccessible; no process was forcibly terminated');
+      return { status: 'stopped', message: 'No owned service is responding and no recorded process remains alive' };
+    }
     const stopped = await request(initial, 'stop', 'POST');
     if (!stopped?.success) throw new Error('The owned service did not accept shutdown');
     for (let i = 0; i < 100; i++) {
       const current = readState(options);
-      if (current?.instance !== initial.instance && !fs.existsSync(path.join(files(options).directory, 'run.lock')))
+      if (current?.instance !== initial.instance && !fs.existsSync(path.join(files(options).directory, 'run.lock')) &&
+          !processMayBeAlive(initial.pid))
         return { status: 'stopped' };
       await sleep(100);
     }

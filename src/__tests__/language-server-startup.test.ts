@@ -13,6 +13,7 @@ const source = ts.transpileModule(readFileSync(path.resolve('src/languageServer.
 
 function createFixture() {
   const startProxy = vi.fn<() => Promise<number>>();
+  const stopProxy = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   const setLanguageServerPortResolver = vi.fn<(getPort: () => number) => void>();
   const logStreams: { end: ReturnType<typeof vi.fn>; write: ReturnType<typeof vi.fn> }[] = [];
   const createWriteStream = vi.fn(() => {
@@ -42,11 +43,13 @@ function createFixture() {
     },
     './constants': {},
     './utils': { setupNodeWrapper: vi.fn() },
-    './proxy': { startProxy, setLanguageServerPortResolver },
+    './proxy': { startProxy, stopProxy, setLanguageServerPortResolver },
   };
   const module = {
     exports: {} as {
       startLanguageServer: (port: number, csrf: string) => Promise<{ port: number; exitPromise: Promise<unknown> }>;
+      killLanguageServer: () => Promise<void>;
+      setIntentionalTermination: (value: boolean) => void;
     },
   };
   runInNewContext(source, {
@@ -62,10 +65,60 @@ function createFixture() {
     setTimeout,
     clearTimeout,
   });
-  return { startProxy, setLanguageServerPortResolver, spawn, shellEnvSync, logStreams, child, start: module.exports.startLanguageServer };
+  return { startProxy, stopProxy, setLanguageServerPortResolver, spawn, shellEnvSync, logStreams, child,
+    start: module.exports.startLanguageServer, stop: module.exports.killLanguageServer,
+    resetTermination: () => module.exports.setIntentionalTermination(false) };
 }
 
 describe('language-server proxy startup dependency', () => {
+  it.each([false, true])('cancels pending startup across shutdown (restart requested early=%s)', async (restartEarly) => {
+    const fixture = createFixture();
+    let ready!: (port: number) => void;
+    const proxyReady = new Promise<number>((resolve) => { ready = resolve; });
+    fixture.startProxy.mockReturnValue(proxyReady);
+    fixture.stopProxy.mockImplementation(async () => { await proxyReady; });
+    const starting = fixture.start(0, 'fixture-token');
+    const cancelled = expect(starting).rejects.toThrow('startup cancelled during shutdown');
+    const stopping = fixture.stop();
+    if (restartEarly) fixture.resetTermination();
+    ready(61002);
+    await Promise.all([cancelled, stopping]);
+    expect(fixture.spawn).not.toHaveBeenCalled();
+    expect(fixture.shellEnvSync).not.toHaveBeenCalled();
+    expect(fixture.logStreams[0].end).toHaveBeenCalledOnce();
+
+    // startAndMonitorLanguageServer explicitly clears intentional termination.
+    fixture.resetTermination();
+    const restarted = fixture.start(0, 'fixture-token');
+    await new Promise((resolve) => setImmediate(resolve));
+    fixture.child.stdout.write('listening on HTTP port at 60001 for HTTP\n');
+    const handle = await restarted;
+    expect(fixture.spawn).toHaveBeenCalledOnce();
+    fixture.child.emit('exit', 0, null);
+    await handle.exitPromise;
+    fixture.child.stdout.end();
+    fixture.child.stderr.end();
+  });
+
+  it('terminates the LS while its unfinished proxy responses are draining', async () => {
+    const fixture = createFixture();
+    fixture.startProxy.mockResolvedValue(61002);
+    const starting = fixture.start(0, 'fixture-token');
+    await new Promise((resolve) => setImmediate(resolve));
+    fixture.child.stdout.write('listening on HTTP port at 60001 for HTTP\n');
+    await starting;
+    let drained!: () => void;
+    fixture.stopProxy.mockImplementation(() => new Promise<void>((resolve) => { drained = resolve; }));
+    const kill = vi.fn(() => { fixture.child.emit('exit', 0, null); return true; });
+    Object.assign(fixture.child, { kill });
+    const stopping = fixture.stop();
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    drained();
+    await stopping;
+    fixture.child.stdout.end();
+    fixture.child.stderr.end();
+  });
+
   it.each([
     ['EADDRINUSE', 'Port 50999 is occupied. The patched language server requires this exact port'],
     ['EINVAL', 'Invalid antigravity-proxy.json: the binary patch requires port 50999'],

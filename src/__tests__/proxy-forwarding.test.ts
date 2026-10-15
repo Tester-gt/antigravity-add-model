@@ -45,6 +45,7 @@ async function fixture(
   upstream: string,
   ideCloudCodeRouting = false,
   lookup?: ConstructorParameters<typeof CloudCodeRouting>[1],
+  shutdownGraceMs?: number,
 ) {
   const directory = fs.mkdtempSync(path.join(tmpdir(), 'agy-forwarding-'));
   directories.push(directory);
@@ -88,7 +89,7 @@ async function fixture(
     './proxy/customRequest': { stopCustomRequests: vi.fn() },
     './modelStore': { readModelConfig: () => [] },
     './schemaValidator': {},
-    './cryptoStore': {},
+    './cryptoStore': { decryptModels: (models: unknown) => models },
     './proxy/loopbackSecurity': loopbackSecurity,
     './proxy/listen': {
       getRequiredProxyPort: () => undefined,
@@ -114,8 +115,9 @@ async function fixture(
   });
   proxies.push(module.exports);
   return {
-    url: `http://127.0.0.1:${await module.exports.startProxy({ dataDirectory: directory, ideCloudCodeRouting })}`,
+    url: `http://127.0.0.1:${await module.exports.startProxy({ dataDirectory: directory, ideCloudCodeRouting, shutdownGraceMs })}`,
     forwarded,
+    stop: module.exports.stopProxy,
   };
 }
 
@@ -153,6 +155,60 @@ function post(url: string, body: string, chunked: boolean) {
 }
 
 describe('buffered Google metadata forwarding', () => {
+  it('delivers a catalogue that completes within the shutdown grace period', async () => {
+    let received!: () => void;
+    const accepted = new Promise<void>((resolve) => { received = resolve; });
+    let upstreamResponse!: http.ServerResponse;
+    const upstream = await serve((_req, res) => {
+      upstreamResponse = res;
+      received();
+    });
+    const proxy = await fixture(upstream, false, undefined, 1000);
+    const result = post(`${proxy.url}/v1internal:fetchAvailableModels`, '{}', false);
+    await accepted;
+    const stopping = proxy.stop();
+    upstreamResponse.end(JSON.stringify({ models: { 'native-fixture': { displayName: 'Native fixture' } } }));
+    const response = await result;
+    await stopping;
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body.toString())).toMatchObject({
+      models: { 'native-fixture': { displayName: 'Native fixture' } },
+    });
+  });
+
+  it.each(['/v1internal:loadCodeAssist', '/v1internal:fetchAvailableModels', '/v1beta/models'].flatMap(
+    (route) => [true, false].map((headers) => ({ route, headers })),
+  ))(
+    'releases an unfinished upstream socket during shutdown: $route (headers=$headers)',
+    async ({ route, headers }) => {
+      let received!: () => void;
+      let closed!: () => void;
+      const accepted = new Promise<void>((resolve) => { received = resolve; });
+      const upstreamClosed = new Promise<void>((resolve) => { closed = resolve; });
+      const upstream = await serve((req, res) => {
+        req.socket.once('close', closed);
+        if (headers) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.write('{"pending":');
+        }
+        received();
+      });
+      const proxy = await fixture(upstream, false, undefined, 50);
+      const request = http.request(`${proxy.url}${route}`, { method: route === '/v1beta/models' ? 'GET' : 'POST' });
+      request.on('error', () => {});
+      request.on('response', (response) => { response.on('error', () => {}); response.resume(); });
+      request.end();
+      try {
+        await accepted;
+        await proxy.stop();
+        await upstreamClosed;
+        expect(proxy.forwarded).toHaveLength(1);
+      } finally {
+        request.destroy();
+      }
+    },
+  );
+
   it('discovers a signed-in caller before forwarding exactly one native generation unchanged', async () => {
     const bodies: string[] = [];
     const upstream = await serve((request, response) => {

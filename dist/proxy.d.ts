@@ -49,7 +49,7 @@ export interface ProxyStartOptions {
     handleManagement?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
     /** IDE service has no owned desktop LS; never reuse desktop routing/origin exceptions. */
     allowLanguageServerRouting?: boolean;
-    /** Node service only: bound shutdown of unfinished management HTTP bodies. */
+    /** Bound draining of unfinished requests on shutdown (default 1500 ms). */
     shutdownGraceMs?: number;
     /** IDE account bootstrap uses PROD, then the account's declared Cloud Code tier. */
     ideCloudCodeRouting?: boolean;

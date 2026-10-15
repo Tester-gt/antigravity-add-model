@@ -78,8 +78,29 @@ let proxyPort = 0;
 let startingProxy: Promise<number> | null = null;
 let stoppingProxy: Promise<void> | null = null;
 let serviceDataDirectory: string | undefined;
-let shutdownGraceMs: number | undefined;
+const DEFAULT_SHUTDOWN_GRACE_MS = 1500;
+let shutdownGraceMs = DEFAULT_SHUTDOWN_GRACE_MS;
 let cloudCodeRouting: CloudCodeRouting | undefined;
+const upstreamRequests = new Set<http.ClientRequest>();
+
+function trackUpstream(request: http.ClientRequest): void {
+  upstreamRequests.add(request);
+  request.once('close', () => upstreamRequests.delete(request));
+  if (stoppingProxy) request.destroy();
+}
+
+function stopUpstreams(): void {
+  for (const request of upstreamRequests) request.destroy();
+}
+
+function rejectDuringShutdown(res: http.ServerResponse): boolean {
+  if (!stoppingProxy) return false;
+  if (!res.destroyed && !res.writableEnded) {
+    res.writeHead(503, { Connection: 'close', 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Proxy is shutting down' }));
+  }
+  return true;
+}
 
 export interface ProxyStartOptions {
   /** Fixed loopback port for the IDE service; no automatic port fallback. */
@@ -89,7 +110,7 @@ export interface ProxyStartOptions {
   handleManagement?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
   /** IDE service has no owned desktop LS; never reuse desktop routing/origin exceptions. */
   allowLanguageServerRouting?: boolean;
-  /** Node service only: bound shutdown of unfinished management HTTP bodies. */
+  /** Bound draining of unfinished requests on shutdown (default 1500 ms). */
   shutdownGraceMs?: number;
   /** IDE account bootstrap uses PROD, then the account's declared Cloud Code tier. */
   ideCloudCodeRouting?: boolean;
@@ -547,7 +568,7 @@ function forwardToGoogle(
 
   let nativeResponse: http.IncomingMessage | undefined;
   const failForwarding = (status: number, message: string) => {
-    if (res.destroyed || res.writableEnded) return;
+    if (stoppingProxy || res.destroyed || res.writableEnded || res.socket?.destroyed) return;
     if (res.headersSent) {
       res.destroy();
       return;
@@ -635,6 +656,7 @@ function forwardToGoogle(
   res.once('close', () => {
     if (!res.writableFinished) proxyReq.destroy();
   });
+  trackUpstream(proxyReq);
 
   if (reqBody) {
     proxyReq.write(reqBody);
@@ -647,6 +669,7 @@ function forwardToGoogle(
 async function resolveFileData(
   body: GeminiRequestBody,
   reqHeaders: Record<string, string | string[] | undefined>,
+  downstream: http.ServerResponse,
 ): Promise<void> {
   const contents = body.contents;
   if (!contents) return;
@@ -654,6 +677,7 @@ async function resolveFileData(
   for (const item of contents) {
     if (!item.parts) continue;
     for (let i = 0; i < item.parts.length; i++) {
+      if (stoppingProxy || downstream.destroyed || downstream.writableEnded) return;
       const p = item.parts[i] as Record<string, unknown>;
       const fd = p.fileData as { mimeType?: string; fileUri?: string } | undefined;
       if (!fd?.fileUri) continue;
@@ -691,27 +715,30 @@ function downloadFileContent(url: string, authHeader: string): Promise<string> {
       reject(new Error('Authenticated file downloads require a Google API HTTPS URL'));
       return;
     }
-    https
-      .request(
-        {
-          hostname: u.hostname,
-          path: u.pathname + u.search,
-          method: 'GET',
-          headers: { Authorization: authHeader },
-          timeout: 30000,
-        },
-        (res) => {
-          if (res.statusCode !== 200) {
-            reject(new Error('HTTP ' + res.statusCode));
-            return;
-          }
-          let d = '';
-          res.on('data', (c: Buffer) => (d += c.toString()));
-          res.on('end', () => resolve(d));
-        },
-      )
-      .on('error', reject)
-      .end();
+    const request = https.request(
+      {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: { Authorization: authHeader },
+        timeout: 30000,
+      },
+      (res) => {
+        res.on('error', reject);
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error('HTTP ' + res.statusCode));
+          return;
+        }
+        let d = '';
+        res.on('data', (c: Buffer) => (d += c.toString()));
+        res.on('end', () => resolve(d));
+      },
+    );
+    request.on('error', reject);
+    request.on('timeout', () => request.destroy(new Error('File download timed out')));
+    trackUpstream(request);
+    request.end();
   });
 }
 
@@ -724,6 +751,7 @@ function handleCustomModelRequest(
   isStream: boolean,
   cloudEnvelope = true,
 ): void {
+  if (res.destroyed || res.writableEnded || rejectDuringShutdown(res)) return;
   void runCustomModelRequest(
     res,
     model,
@@ -972,6 +1000,7 @@ function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer
     });
 
     lsRes.on('error', (err) => {
+      if (stoppingProxy || res.destroyed || res.socket?.destroyed) return;
       log.error('[Proxy] LS error for GetAvailableModels:', err.message);
       if (!res.headersSent) {
         res.writeHead(502);
@@ -990,6 +1019,7 @@ function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer
   });
 
   lsReq.on('error', (err) => {
+    if (stoppingProxy || res.destroyed || res.socket?.destroyed) return;
     log.error('[Proxy] GetAvailableModels forward error:', err.message);
     if (!res.headersSent) {
       res.writeHead(502);
@@ -997,6 +1027,7 @@ function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer
     }
   });
 
+  trackUpstream(lsReq);
   lsReq.write(reqBody);
   lsReq.end();
 }
@@ -1075,7 +1106,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     bodyChunks.push(chunk);
   });
   req.on('end', () => {
-    if (bodyRejected) return;
+    if (bodyRejected || rejectDuringShutdown(res)) return;
 
     const fullBody = Buffer.concat(bodyChunks);
     const bodyStr = fullBody.toString('utf-8');
@@ -1113,7 +1144,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 
       let responded = false;
       const reply = (catalog: unknown = {}) => {
-        if (responded || res.headersSent || res.writableEnded || res.destroyed) return;
+        if (responded || res.headersSent || res.writableEnded || res.destroyed || res.socket?.destroyed) return;
         responded = true;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(customCloudCodeCatalog(catalog)));
@@ -1151,6 +1182,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         googleReq.destroy();
       });
       googleReq.on('error', () => reply());
+      trackUpstream(googleReq);
 
       if (fullBody && fullBody.length > 0) {
         googleReq.write(fullBody);
@@ -1245,6 +1277,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       });
 
       googleReq.on('error', (err) => {
+        if (stoppingProxy || res.destroyed || res.writableEnded || res.socket?.destroyed) return;
         log.error('[Proxy] Google models list request error:', err);
         const customModels = loadCustomModels();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1260,6 +1293,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           }),
         );
       });
+      trackUpstream(googleReq);
       googleReq.end();
       return;
     }
@@ -1298,6 +1332,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             resolveFileData(
               prepared.body as GeminiRequestBody,
               req.headers as Record<string, string | string[] | undefined>,
+              res,
             ).then(() => {
               handleCustomModelRequest(res, matchedCustomModel, prepared.body as GeminiRequestBody, isStream);
             });
@@ -1367,6 +1402,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           resolveFileData(
             prepared.body as GeminiRequestBody,
             req.headers as Record<string, string | string[] | undefined>,
+            res,
           ).then(() => {
             handleCustomModelRequest(
               res,
@@ -1417,13 +1453,22 @@ export async function startProxy(options: ProxyStartOptions = {}): Promise<numbe
   if (options.port !== undefined && (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)) {
     throw new Error('Proxy port must be an integer between 1 and 65535');
   }
+  if (
+    options.shutdownGraceMs !== undefined &&
+    (!Number.isInteger(options.shutdownGraceMs) || options.shutdownGraceMs < 0 || options.shutdownGraceMs > 60000)
+  ) {
+    throw new Error('Proxy shutdown grace must be an integer between 0 and 60000 milliseconds');
+  }
   serviceDataDirectory = options.dataDirectory ? path.resolve(options.dataDirectory) : undefined;
   languageServerRoutingEnabled = options.allowLanguageServerRouting !== false;
-  shutdownGraceMs = options.shutdownGraceMs;
+  shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
   cloudCodeRouting = options.ideCloudCodeRouting ? new CloudCodeRouting() : undefined;
   const requiredPort = options.port ?? getRequiredProxyPort(require('electron').app.getAppPath());
   const newServer = http.createServer((req, res) => {
     if (!guardLoopbackRequest(req, res, currentLanguageServerPort())) return;
+    // Already-connected clients can pipeline another request while the listener drains.
+    // Do not start new upstream work after cancellation has begun.
+    if (rejectDuringShutdown(res)) return;
     if (!options.handleManagement?.(req, res)) handleRequest(req, res);
   });
   server = newServer;
@@ -1464,11 +1509,13 @@ export function stopProxy(): Promise<void> {
     if (server) {
       const closingServer = server;
       await new Promise<void>((resolve) => {
-        const timer =
-          shutdownGraceMs === undefined
-            ? undefined
-            : setTimeout(() => closingServer.closeAllConnections(), shutdownGraceMs);
-        timer?.unref?.();
+        // Native upstream streams and incomplete HTTP bodies are not necessarily
+        // canceled by stopCustomRequests. Never let them hold application quit open.
+        const timer = setTimeout(() => {
+          closingServer.closeAllConnections();
+          stopUpstreams();
+        }, shutdownGraceMs);
+        timer.unref();
         closingServer.close(() => {
           clearTimeout(timer);
           resolve();
@@ -1476,6 +1523,9 @@ export function stopProxy(): Promise<void> {
       });
       log.info('[Proxy] Server stopped');
     }
+    // A disconnected downstream or buffered catalogue response may leave an
+    // upstream alive even after the inbound listener has finished closing.
+    stopUpstreams();
     // Final native responses may create routing markers while shutdown drains.
     subagentRouting.clear();
     server = null;

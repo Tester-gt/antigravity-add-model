@@ -88,6 +88,7 @@ exports.LS_BINARY = electron_1.app.isPackaged
 let _lsProcess = null;
 let _lsPort = 0;
 let _intentionalTermination = false;
+let _terminationGeneration = 0;
 let _restartCount = 0;
 let _lastRestartTime = 0;
 // ---------------------------------------------------------------------------
@@ -190,12 +191,20 @@ function setupNodeModules(env, modules) {
  */
 function startLanguageServer(port, csrf, headless) {
     return new Promise(async (resolve, reject) => {
+        const terminationGeneration = _terminationGeneration;
         _lsPort = 0;
         const logStream = fs.createWriteStream((0, paths_1.getLsLogPath)(), { flags: 'w' });
         let proxyPort;
         try {
+            if (_intentionalTermination)
+                throw new Error('Language server startup cancelled during shutdown');
             (0, proxy_1.setLanguageServerPortResolver)(getLsPort);
             proxyPort = await (0, proxy_1.startProxy)();
+            // Shutdown may finish while proxy startup is pending. A later explicit
+            // restart must not revive this older, cancelled startup attempt either.
+            if (_intentionalTermination || terminationGeneration !== _terminationGeneration) {
+                throw new Error('Language server startup cancelled during shutdown');
+            }
         }
         catch (err) {
             console.error('[LanguageServer] Failed to start local proxy:', err);
@@ -340,6 +349,8 @@ function startLanguageServer(port, csrf, headless) {
 }
 /** Sets whether the termination was intentional (suppresses crash reports). */
 function setIntentionalTermination(value) {
+    if (value)
+        _terminationGeneration++;
     _intentionalTermination = value;
 }
 /**
@@ -409,7 +420,11 @@ function sleep(ms) {
 }
 async function killLanguageServer() {
     setIntentionalTermination(true);
-    await (0, proxy_1.stopProxy)();
+    // The LS can own unfinished proxy responses. Terminate it while the proxy
+    // drains, rather than waiting for those responses before signaling the LS.
+    await Promise.all([(0, proxy_1.stopProxy)(), terminateLanguageServer()]);
+}
+async function terminateLanguageServer() {
     const proc = getLsProcess();
     if (proc) {
         const pid = proc.pid;
@@ -420,10 +435,13 @@ async function killLanguageServer() {
             });
         });
         proc.kill('SIGTERM');
+        let timeout;
         const result = await Promise.race([
             exitPromise.then(() => 'exited'),
-            new Promise((resolve) => setTimeout(() => resolve('timeout'), 5000)),
-        ]);
+            new Promise((resolve) => {
+                timeout = setTimeout(() => resolve('timeout'), 5000);
+            }),
+        ]).finally(() => clearTimeout(timeout));
         if (result === 'timeout' && pid !== undefined) {
             console.warn(`Language server (PID ${pid}) did not exit gracefully within 5s. Sending SIGKILL.`);
             try {

@@ -206,11 +206,84 @@ describe('owned Node proxy and management HTTP', () => {
     fs.writeFileSync(path.join(dataDirectory, '.ide-proxy/state.json'), JSON.stringify({ version: 1, token: 'a'.repeat(64), instance: randomUUID(), port, pid: process.pid }));
     const foreignOptions = { ...options, port, dataDirectory };
     expect((await serviceCommand({ ...foreignOptions, command: 'status' })).status).toBe('stopped');
-    expect((await serviceCommand({ ...foreignOptions, command: 'stop' })).status).toBe('stopped');
+    await expect(serviceCommand({ ...foreignOptions, command: 'stop' })).rejects.toThrow(/still alive|still running|could not be verified/);
     expect(stopRequests).toBe(0);
     await expect(serviceCommand(foreignOptions)).rejects.toThrow(/exited|occupied|EADDRINUSE/);
     expect((await request(port, '/still-here')).status).toBe(200);
     expect(stopRequests).toBe(0);
+  });
+  it('does not report stopped while an unresponsive recorded process or run lock is alive', async () => {
+    const dataDirectory = directory();
+    const serviceDirectory = path.join(dataDirectory, '.ide-proxy');
+    fs.mkdirSync(serviceDirectory);
+    const state = { version: 1, token: 'b'.repeat(64), instance: randomUUID(), port: await unusedPort(), pid: process.pid };
+    const stoppedOptions = { ...options, command: 'stop', port: state.port, dataDirectory };
+    fs.writeFileSync(path.join(serviceDirectory, 'state.json'), JSON.stringify(state));
+    await expect(serviceCommand(stoppedOptions)).rejects.toThrow(/still alive|still running|could not be verified/);
+    expect(fs.readFileSync(path.join(serviceDirectory, 'state.json'), 'utf8')).toBe(JSON.stringify(state));
+    fs.unlinkSync(path.join(serviceDirectory, 'state.json'));
+    fs.writeFileSync(path.join(serviceDirectory, 'run.lock'), String(process.pid));
+    await expect(serviceCommand(stoppedOptions)).rejects.toThrow(/still alive|still running|could not be verified/);
+    expect(fs.readFileSync(path.join(serviceDirectory, 'run.lock'), 'utf8')).toBe(String(process.pid));
+    const cli = fileURLToPath(new URL('../../scripts/desktop-service.mjs', import.meta.url));
+    await expect(promisify(execFile)(process.execPath, [cli, 'stop', '--data-dir', dataDirectory], { windowsHide: true, timeout: 5000 }))
+      .rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('shutdown could not be verified') });
+  });
+  it('still treats absent and dead service records as stopped without deleting them', async () => {
+    const dataDirectory = directory();
+    const serviceDirectory = path.join(dataDirectory, '.ide-proxy');
+    const stoppedOptions = { ...options, command: 'stop', port: await unusedPort(), dataDirectory };
+    expect((await serviceCommand(stoppedOptions)).status).toBe('stopped');
+    // A completed child supplies a real stale PID; no signal is sent to it beyond the liveness probe.
+    const exited = await promisify(execFile)(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { windowsHide: true });
+    const deadPid = Number(exited.stdout);
+    expect(() => process.kill(deadPid, 0)).toThrow();
+    let foreignRequests = 0;
+    stoppedOptions.port = await listen(http.createServer((_req, res) => { foreignRequests++; res.end('{}'); }));
+    fs.mkdirSync(serviceDirectory);
+    const state = JSON.stringify({ version: 1, token: 'c'.repeat(64), instance: randomUUID(), port: stoppedOptions.port, pid: deadPid });
+    fs.writeFileSync(path.join(serviceDirectory, 'state.json'), state);
+    fs.writeFileSync(path.join(serviceDirectory, 'run.lock'), String(deadPid));
+    expect((await serviceCommand(stoppedOptions)).status).toBe('stopped');
+    expect(fs.readFileSync(path.join(serviceDirectory, 'state.json'), 'utf8')).toBe(state);
+    expect(fs.readFileSync(path.join(serviceDirectory, 'run.lock'), 'utf8')).toBe(String(deadPid));
+    expect(foreignRequests).toBe(0);
+  });
+  it('refuses malformed run locks instead of declaring an unverified service stopped', async () => {
+    const dataDirectory = directory();
+    const serviceDirectory = path.join(dataDirectory, '.ide-proxy');
+    fs.mkdirSync(serviceDirectory);
+    fs.writeFileSync(path.join(serviceDirectory, 'run.lock'), 'invalid-owner');
+    await expect(serviceCommand({ ...options, command: 'stop', dataDirectory })).rejects.toThrow('Invalid service lock');
+    expect(fs.readFileSync(path.join(serviceDirectory, 'run.lock'), 'utf8')).toBe('invalid-owner');
+  });
+  it('does not declare shutdown complete when an authenticated owner removes its records but remains alive', async () => {
+    const dataDirectory = directory();
+    const serviceDirectory = path.join(dataDirectory, '.ide-proxy');
+    fs.mkdirSync(serviceDirectory);
+    let stopRequests = 0;
+    const server = http.createServer((req, res) => {
+      if (req.headers.authorization !== `Bearer ${state.token}`) { res.writeHead(401).end(); return; }
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/_addon/health') {
+        res.end(JSON.stringify({ service: 'antigravity-model-proxy', instance: state.instance, pid: state.pid, port: state.port }));
+      } else if (req.url === '/_addon/stop' && req.method === 'POST') {
+        stopRequests++;
+        fs.unlinkSync(path.join(serviceDirectory, 'state.json'));
+        fs.unlinkSync(path.join(serviceDirectory, 'run.lock'));
+        res.end('{"success":true}');
+        // A faulty owner acknowledges shutdown and cleans its records before exiting.
+        // This fixture deliberately stays alive and listening.
+      } else res.writeHead(404).end();
+    });
+    const state = { version: 1, token: 'd'.repeat(64), instance: randomUUID(), port: await listen(server), pid: process.pid };
+    fs.writeFileSync(path.join(serviceDirectory, 'state.json'), JSON.stringify(state));
+    fs.writeFileSync(path.join(serviceDirectory, 'run.lock'), String(state.pid));
+    await expect(serviceCommand({ ...options, command: 'stop', dataDirectory })).rejects.toThrow('Shutdown is still pending');
+    expect(stopRequests).toBe(1);
+    expect(server.listening).toBe(true);
+    expect(fs.existsSync(path.join(serviceDirectory, 'state.json'))).toBe(false);
+    expect(fs.existsSync(path.join(serviceDirectory, 'run.lock'))).toBe(false);
   });
   it('rejects a second direct run for the same data directory even on a different free port', async () => {
     const cli = fileURLToPath(new URL('../../scripts/desktop-service.mjs', import.meta.url));
