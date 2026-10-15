@@ -73,15 +73,18 @@ function translateStreamChunk(provider, chunk, stateKey, apiFormat, streamKey, t
         return anthropic.mapAnthropicChunkToGemini(chunk, stateKey, streamKey, toolSchemas);
     return openai.mapOpenAIChunkToGemini(chunk, stateKey, streamKey, toolSchemas);
 }
-function getProviderHeaders(provider, apiKey = '', apiFormat) {
+function getProviderHeaders(provider, apiKey = '', apiFormat, apiUrl = '') {
     const headers = { 'Content-Type': 'application/json' };
     const format = (0, providers_1.resolveApiFormat)(provider, apiFormat);
+    const opencode = (0, providers_1.isOpencodeEndpoint)(apiUrl, provider);
     if (format === 'anthropic')
         headers['anthropic-version'] = '2023-06-01';
     if (apiKey && apiKey !== 'none') {
         if (/^(enc:|fallback:|local-gcm:|DECRYPTION_FAILED)/.test(apiKey))
             throw new Error('API key could not be decrypted; save the key again.');
-        if (format === 'google')
+        if (opencode)
+            headers.Authorization = `Bearer ${apiKey}`;
+        else if (format === 'google')
             headers['x-goog-api-key'] = apiKey;
         else if (format === 'anthropic')
             headers['x-api-key'] = apiKey;
@@ -92,8 +95,8 @@ function getProviderHeaders(provider, apiKey = '', apiFormat) {
         headers['HTTP-Referer'] = 'https://antigravity.google';
         headers['X-Title'] = 'Antigravity';
     }
-    if (['opencode', 'zen', 'opencode-go'].includes(provider))
-        headers['User-Agent'] = 'opencode';
+    if (opencode)
+        headers['User-Agent'] = providers_1.OPENCODE_USER_AGENT;
     return headers;
 }
 function supportsStreaming(_provider) {

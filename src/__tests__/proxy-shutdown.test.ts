@@ -1,3 +1,4 @@
+import * as googlePoolFailover from '../proxy/googlePoolFailover';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as http from 'node:http';
 import * as net from 'node:net';
@@ -27,7 +28,8 @@ const dependencies: Record<string, unknown> = {
   './proxy/modelCatalog': {},
   './modelIdentity': {},
   './proxy/subagentModels': {},
-  './proxy/nativeSubagentResponse': {},
+  './proxy/googlePoolFailover': googlePoolFailover,
+    './proxy/nativeSubagentResponse': {},
   './proxy/customRequest': { stopCustomRequests: vi.fn() },
   './proxy/subagentRouting': { subagentRouting: { clear: vi.fn() } },
   './modelStore': {},

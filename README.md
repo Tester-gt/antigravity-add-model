@@ -49,11 +49,11 @@ Add external API providers and local models alongside Antigravity's built-in mod
 
 | Capability | Included |
 | --- | --- |
-| **Manage models** | Provider groups, search, edit, duplicate, enable/disable, and model discovery. |
+| **Manage models** | Provider groups, search, edit, duplicate, enable/disable, model discovery, and keyboard search in the standalone model dropdown. |
 | **Connect your providers** | OpenAI, Anthropic, Gemini, OpenRouter, [Cloudflare Workers AI](docs/providers.md#cloudflare-workers-ai), and other compatible APIs; local services such as Ollama, LM Studio, and vLLM. |
 | **Tune requests** | Protocol selection, reasoning settings, context/output limits, custom headers, timeouts, retries, fallbacks, and circuit breakers. |
 | **Choose subagent models** | Clients with `invoke_subagent` support custom child models with isolated routing. Antigravity IDE can delegate independent text tasks through the [custom-model MCP tools](docs/ide.md#delegate-to-custom-models-with-mcp). |
-| **Use Google account pools** | [Antigravity account sign-in](docs/configuration.md#google-cloud-code-account-pools) using a recognized IDE 2.5.5 installation, or your own OAuth client; project preparation, encrypted storage, quota checks and adaptive account selection. [Live sign-in, refresh and generation results](docs/configuration.md#verified-google-account-flow). |
+| **Use Google account pools** | [Antigravity account sign-in](docs/configuration.md#google-cloud-code-account-pools), grouped quota cards, reset times, reconnect and preferred-account controls; optional matching-pool failover for native requests. Available in desktop settings and the IDE web manager. [Setup and verification](docs/configuration.md#google-cloud-code-account-pools). |
 | **Inspect direct requests** | Diagnostics with recent requests, measured latency/token usage, and an explicit small generation test. |
 | **Connect Antigravity IDE** | Reversible settings adapter, owned proxy launcher and browser model manager; native picker and streamed chat verified on Windows IDE 2.5.5 with a local OpenAI-compatible provider. [Setup](docs/ide.md). |
 | **Keep native model selections stable** | Persistent collision-free IDs for model aliases and effort variants, with explicit [native picker capacity](docs/ide.md#native-model-identities-and-capacity). |

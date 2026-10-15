@@ -1,3 +1,4 @@
+import * as googlePoolFailover from '../proxy/googlePoolFailover';
 import * as loopbackSecurity from '../proxy/loopbackSecurity';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
@@ -92,6 +93,7 @@ async function fixture(models: CustomModel[], fallback: string) {
     './proxy/cloudCodeRouting': { CloudCodeRouting },
     './proxy/subagentRouting': subagentRouting,
     './proxy/subagentModels': subagentModels,
+    './proxy/googlePoolFailover': googlePoolFailover,
     './proxy/nativeSubagentResponse': nativeSubagentResponse,
     './proxy/customRequest': customRequest,
     './modelStore': { readModelConfig: () => models.map((model) => ({ ...model })) },

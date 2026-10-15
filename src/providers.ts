@@ -51,9 +51,9 @@ export const PROVIDERS: readonly ProviderPreset[] = [
   preset('cerebras', 'Cerebras', 'https://api.cerebras.ai/v1/chat/completions'),
   preset('nvidia', 'NVIDIA NIM', 'https://integrate.api.nvidia.com/v1/chat/completions'),
   preset('minimax', 'MiniMax', 'https://api.minimax.io/anthropic/v1/messages', 'anthropic'),
-  preset('opencode', 'OpenCode', 'https://opencode.ai/zen/v1/chat/completions'),
-  preset('zen', 'OpenCode Zen', 'https://opencode.ai/zen/v1/chat/completions'),
-  preset('opencode-go', 'OpenCode Go', 'https://opencode.ai/zen/go/v1/chat/completions'),
+  preset('opencode', 'OpenCode', 'https://opencode.ai/inference/openai/v1/chat/completions', 'openai', false),
+  preset('zen', 'OpenCode Zen', 'https://opencode.ai/zen/v1/chat/completions', 'openai', false),
+  preset('opencode-go', 'OpenCode Go', 'https://opencode.ai/inference/go/openai/v1/chat/completions'),
   preset('wafer', 'Wafer (custom endpoint)', '', 'anthropic'),
   preset('zai', 'Z.AI', 'https://api.z.ai/api/anthropic/v1/messages', 'anthropic'),
   preset('xai', 'xAI', 'https://api.x.ai/v1/chat/completions'),
@@ -71,6 +71,36 @@ export const PROVIDERS: readonly ProviderPreset[] = [
 
 export function getProvider(id: string): ProviderPreset | undefined {
   return PROVIDERS.find((provider) => provider.id === id);
+}
+
+// OpenCode documents free chat requests without Authorization and asks external
+// coding agents to identify themselves, rather than impersonating its own CLI.
+export const OPENCODE_USER_AGENT = 'antigravity-add-model/2.0.1';
+
+export function isOpencodeProvider(provider?: string): boolean {
+  return ['opencode', 'zen', 'opencode-go'].includes(provider || '');
+}
+
+/** Explicit providers may use a gateway; automatic detection requires the exact official origin. */
+export function isOpencodeEndpoint(apiUrl: string, provider?: string): boolean {
+  if (isOpencodeProvider(provider)) return true;
+  try {
+    const url = new URL(apiUrl);
+    return url.origin === 'https://opencode.ai' && /^\/(?:inference|zen)(?:\/|$)/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Classify access failures without exposing echoed credentials or provider response text. */
+export function describeOpencodeAccessError(status: number, body = ''): string {
+  if (status === 403 && /free tier can only be used from within opencode/i.test(body)) {
+    return 'OpenCode restricts this free model to its own client (HTTP 403). Use the official OpenCode client or choose a model available to external clients through the OpenCode API.';
+  }
+  if (status === 401) {
+    return 'OpenCode authentication rejected (HTTP 401). Add a valid OpenCode Console API key for paid models; keyless access is limited to the free chat models allowed by the service.';
+  }
+  return `OpenCode denied access (HTTP ${status}). Check the model, workspace permissions, and API key or Go subscription. Free pricing does not guarantee access from every client.`;
 }
 
 /** Explicit presets can use a proxy origin; only the official HTTPS origin is auto-detected. */

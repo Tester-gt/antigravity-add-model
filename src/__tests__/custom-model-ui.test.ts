@@ -155,6 +155,9 @@ async function fixture(
       },
     }),
     'storage:google-pool-status': () => ({ success: true, accounts: [{ id: 'saved-account', inFlight: 0 }] }),
+    'storage:google-link-account': () => ({ success: true }),
+    'storage:google-select-account': () => ({ success: true }),
+    'storage:google-remove-account': () => ({ success: true }),
   };
   const invoke = vi.fn(async (channel: string, ...args: unknown[]) => {
     if (!handlers[channel]) throw new Error(`Unexpected IPC: ${channel}`);
@@ -798,7 +801,7 @@ describe('custom model settings in the preserved vendor preload', () => {
         name: model.name,
         googleAccounts: [expect.objectContaining({ id: 'saved-account', refreshToken: '********' })],
         googleProject: 'my-project',
-        googlePool: { strategy: 'round-robin', maxConcurrency: 3, cooldownMs: 90000 },
+        googlePool: { strategy: 'round-robin', maxConcurrency: 3, cooldownMs: 90000, nativeFailoverEnabled: false },
       }),
     );
     await f.click('Fetch provider models');
@@ -826,7 +829,7 @@ describe('custom model settings in the preserved vendor preload', () => {
           }),
         ],
         googleProject: 'my-project',
-        googlePool: { strategy: 'round-robin', maxConcurrency: 3, cooldownMs: 90000 },
+        googlePool: { strategy: 'round-robin', maxConcurrency: 3, cooldownMs: 90000, nativeFailoverEnabled: false },
       }),
     );
   });
@@ -1117,5 +1120,73 @@ describe('custom model settings in the preserved vendor preload', () => {
     dialog.style.display = '';
     await vi.waitFor(() => expect(dialog.querySelector('#agy-custom-models-section')).toBeTruthy());
     expect(f.document.querySelectorAll('#agy-custom-models-section')).toHaveLength(1);
+  });
+});
+
+describe('Google fleet and native picker search', () => {
+  const pool = (name: string, id: string) => ({ ...model, name, provider:'google-cloudcode', googleAccounts:[{id,email:`${id}@example.com`,authMode:'antigravity'}] });
+  it('clears a deleted preference when editing an account pool', async () => {
+    const configured = { ...pool('models/edit-pool', 'primary'), googlePool: { preferredAccountId: 'primary' }, googleAccounts: [
+      { id: 'primary', accessToken: '********', authMode: 'antigravity' },
+      { id: 'standby', accessToken: '********', authMode: 'antigravity' },
+    ] };
+    const f = await fixture(undefined, [configured]);
+    await f.click('Edit');
+    await f.click('Remove account');
+    await f.click('Save model');
+    const saved = f.getModels()[0];
+    expect((saved.googlePool as { preferredAccountId?: string }).preferredAccountId).toBeUndefined();
+    expect((saved.googleAccounts as { id: string }[]).map(value => value.id)).toEqual(['standby']);
+  });
+  it('queries each account through its owner model and displays missing/error quota honestly', async () => {
+    const f = await fixture(undefined, [pool('models/one','account-one'), pool('models/two','account-two')]);
+    await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith('storage:google-test-account', {modelName:'models/two',accountId:'account-two'}));
+    const fleet = f.document.getElementById('agy-google-account-pool-section')!;
+    expect(fleet.textContent).toContain('Quota unavailable');
+    expect(fleet.textContent).not.toContain('100%');
+    f.handlers['storage:google-test-account'] = () => ({success:false,error:'Quota request denied'});
+    await f.click('Refresh quotas');
+    expect(fleet.textContent).toContain('Quota request denied');
+    expect(fleet.textContent).not.toContain('100%');
+  });
+  it('uses backend preference, reconnect and confirmed deletion actions without masked save loops', async () => {
+    const f = await fixture(undefined, [pool('models/one','saved-account')]);
+    await f.click('Use preferred');
+    expect(f.invoke).toHaveBeenCalledWith('storage:google-select-account',{modelName:'models/one',accountId:'saved-account'});
+    await f.click('Reconnect');
+    await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith('storage:google-link-account',{modelName:'models/one',accountId:'pending-account',replaceAccountId:'saved-account'}));
+    expect(f.invoke.mock.calls.some(([channel]) => channel === 'storage:save-custom-model')).toBe(false);
+    await f.click('Remove');
+    expect(f.invoke.mock.calls.some(([channel]) => channel === 'storage:google-remove-account')).toBe(false);
+    await f.click('Remove account');
+    expect(f.invoke).toHaveBeenCalledWith('storage:google-remove-account',{modelName:'models/one',accountId:'saved-account'});
+  });
+  it('filters picker rows, preserves vendor-hidden items, restores on close and reopens cleanly', async () => {
+    const f = await fixture();
+    const menu = f.document.createElement('div');
+    menu.setAttribute('role','menu');
+    menu.setAttribute('data-state','open');
+    menu.innerHTML='<div>Model</div><button role="menuitem" data-model="gemini">Gemini</button><button role="menuitem" data-model="claude">Claude</button><button role="menuitem" style="display:none">Retired model</button><button role="menuitem">View Usage</button>';
+    f.document.body.append(menu);
+    await vi.waitFor(() => expect(menu.querySelector('.agy-model-search-input')).toBeTruthy());
+    const input = menu.querySelector<HTMLInputElement>('.agy-model-search-input')!;
+    input.value='claude'; input.dispatchEvent(new f.dom.window.Event('input'));
+    expect(menu.querySelector<HTMLElement>('[data-model="gemini"]')?.style.display).toBe('none');
+    let clicked=false; menu.querySelector('[data-model="claude"]')!.addEventListener('click',()=>{clicked=true});
+    input.dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(clicked).toBe(true);
+    menu.setAttribute('data-state','closed');
+    await vi.waitFor(() => expect(menu.querySelector('.agy-model-search-input')).toBeNull());
+    expect(menu.querySelector<HTMLElement>('[data-model="gemini"]')?.style.display).toBe('');
+    expect([...menu.querySelectorAll('button')].find(node=>node.textContent==='Retired model')?.style.display).toBe('none');
+    menu.setAttribute('data-state','open');
+    await vi.waitFor(() => expect(menu.querySelector<HTMLInputElement>('.agy-model-search-input')?.value).toBe(''));
+  });
+  it('does not inject search into a usage submenu', async () => {
+    const f=await fixture();
+    const submenu=f.document.createElement('div'); submenu.setAttribute('role','menu'); submenu.setAttribute('data-radix-menu-sub-content','');
+    submenu.innerHTML='<span>Model</span><button>Gemini</button><button>View Usage</button>';
+    f.document.body.append(submenu); await new Promise(done=>setTimeout(done,250));
+    expect(submenu.querySelector('.agy-model-search-input')).toBeNull();
   });
 });

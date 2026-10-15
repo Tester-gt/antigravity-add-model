@@ -34,6 +34,8 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GOOGLE_TOKEN_URL = exports.GOOGLE_AUTHORIZATION_URL = void 0;
+exports.parseGoogleIdToken = parseGoogleIdToken;
+exports.fetchGoogleUserInfo = fetchGoogleUserInfo;
 exports.loginGoogleAccount = loginGoogleAccount;
 /** Explicit Google desktop OAuth login with PKCE and a fresh loopback callback per attempt. */
 const http = __importStar(require("node:http"));
@@ -44,6 +46,114 @@ const googleNativeClient_1 = require("./googleNativeClient");
 exports.GOOGLE_AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 exports.GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPES = 'https://www.googleapis.com/auth/cloud-platform';
+function parseGoogleIdToken(idToken) {
+    if (!idToken || typeof idToken !== 'string' || idToken.length > 16384)
+        return undefined;
+    const parts = idToken.split('.');
+    if (parts.length < 2)
+        return undefined;
+    try {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+        const email = identityText(payload?.email);
+        const name = identityText(payload?.name);
+        if (email || name)
+            return { email, name };
+    }
+    catch { }
+    return undefined;
+}
+function identityText(value) {
+    return typeof value === 'string' && value.trim() && value.length <= 320 && !/[\r\n\0]/.test(value)
+        ? value.trim()
+        : undefined;
+}
+function fetchGoogleUserInfo(accessToken, signal) {
+    return new Promise((resolve) => {
+        if (!accessToken || signal?.aborted) {
+            resolve({});
+            return;
+        }
+        let settled = false;
+        let req;
+        let deadline;
+        const finish = (val = {}) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(deadline);
+            if (signal)
+                signal.removeEventListener('abort', onAbort);
+            resolve(val);
+        };
+        const onAbort = () => {
+            try {
+                req?.destroy?.();
+            }
+            catch { }
+            finish({});
+        };
+        if (signal)
+            signal.addEventListener('abort', onAbort, { once: true });
+        try {
+            req = https.request('https://www.googleapis.com/oauth2/v2/userinfo', {
+                method: 'GET',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    Accept: 'application/json',
+                    'User-Agent': 'antigravity-add-model',
+                },
+            }, (res) => {
+                const chunks = [];
+                let size = 0;
+                res.on('data', (c) => {
+                    size += c.length;
+                    if (size > 64 * 1024) {
+                        try {
+                            res.destroy();
+                            req?.destroy();
+                        }
+                        catch { }
+                        finish({});
+                    }
+                    else
+                        chunks.push(c);
+                });
+                res.on('error', () => finish({}));
+                res.on('aborted', () => finish({}));
+                res.on('end', () => {
+                    try {
+                        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                            const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                            const email = identityText(data?.email);
+                            const name = identityText(data?.name);
+                            finish({ email, name });
+                            return;
+                        }
+                    }
+                    catch { }
+                    finish({});
+                });
+            });
+            if (!req) {
+                finish({});
+                return;
+            }
+            req.on('error', () => finish({}));
+            req.on('close', () => finish({}));
+            deadline = setTimeout(() => {
+                try {
+                    req?.destroy();
+                }
+                catch { }
+                finish({});
+            }, 5000);
+            req.end();
+        }
+        catch {
+            finish({});
+        }
+    });
+}
 function cancellation(message = 'Google login cancelled') {
     return Object.assign(new Error(message), { name: 'AbortError' });
 }
@@ -234,7 +344,7 @@ async function loginGoogleAccount(options, openExternal, dependencies = {}) {
             if (clientSecret)
                 parameters.set('client_secret', clientSecret);
             void (dependencies.exchangeToken || exchangeToken)(parameters, tokenController.signal)
-                .then((tokens) => {
+                .then(async (tokens) => {
                 if (finished) {
                     reply(410, 'This login attempt has ended.');
                     return;
@@ -243,11 +353,32 @@ async function loginGoogleAccount(options, openExternal, dependencies = {}) {
                     throw new Error('Google did not return an access token');
                 const seconds = Number(tokens.expires_in);
                 const expiresIn = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 86400) : 3600;
+                let identity = parseGoogleIdToken(tokens.id_token);
+                const userInfo = dependencies.fetchUserInfo || (!dependencies.exchangeToken ? fetchGoogleUserInfo : undefined);
+                if (!identity?.email && tokens.access_token && userInfo) {
+                    try {
+                        const info = await userInfo(tokens.access_token, tokenController.signal);
+                        if (info.email || info.name) {
+                            identity = { ...identity, ...info };
+                        }
+                    }
+                    catch { }
+                }
+                if (finished || tokenController.signal.aborted) {
+                    reply(410, 'This login attempt has ended.');
+                    return;
+                }
+                const email = identity?.email;
+                const actualName = identity?.name;
+                const userLabel = options.label?.trim();
+                const isGeneric = !userLabel || userLabel.toLowerCase() === 'google account';
+                const label = !isGeneric ? userLabel : email || actualName || 'Google account';
                 reply(200, 'Google login completed. Return to Antigravity and save the model to retain this account. You can close this page.');
                 finish(undefined, {
                     authMode: options.authMode || 'custom',
                     id: (0, node_crypto_1.randomUUID)(),
-                    label: options.label?.trim() || 'Google account',
+                    label,
+                    ...(email ? { email } : {}),
                     accessToken: tokens.access_token,
                     ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
                     expiresAt: (dependencies.now || Date.now)() + expiresIn * 1000,

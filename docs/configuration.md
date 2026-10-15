@@ -353,7 +353,7 @@ if the following preparation step fails or is cancelled. This preserves a newly
 rotated refresh token; it does not mark failed preparation as successful or
 overwrite concurrent account edits.
 
-Each account has a unique stable `id`, optional `label`, `enabled`, `project`,
+Each account has a unique stable `id`, optional `label`, `email`, `enabled`, `project`,
 `clientId`, `clientSecret`, `refreshToken`, `accessToken`, and `expiresAt` (Unix
 milliseconds). `authMode` records `antigravity` or `custom`; older entries without
 it retain custom-client behavior. Preparation also records `cloudCodeEndpoint`,
@@ -380,6 +380,33 @@ block a different upstream model using that account; authentication failures and
 concurrency capacity remain account-wide. A quota snapshot disables an account
 globally only when all returned fresh buckets explicitly report zero. One empty
 Claude bucket must not disable a positive Gemini bucket. No refill time is guessed.
+
+### Quota panel and preferred accounts
+
+The Google account panel is available in desktop settings and the IDE's browser
+model manager. It groups the provider's quota buckets and shows supplied reset
+times. Unknown quota stays unknown; refreshing a card does not
+generate a completion or purchase additional quota. Each account is queried
+through the saved model that owns it, including when multiple pools are present.
+
+**Use preferred** saves `googlePool.preferredAccountId` for that pool. The chosen
+account is preferred only while enabled, authenticated and eligible for the
+requested upstream model; quota, cooldown and concurrency limits still apply.
+**Reconnect** stores the new OAuth credentials while retaining the account ID.
+Account removal affects the selected pool, and other saved models remain intact.
+
+Set `googlePool.nativeFailoverEnabled` to `true` in the model editor to let native
+Google generation retry through that saved pool after a confirmed quota/rate-limit
+response. This is off by default. The saved `externalModelName` must match the
+native request's model ID, and exactly one enabled opted-in pool must match.
+Ambiguous configurations do not merge accounts or choose a pool arbitrarily.
+Retries use at most three eligible accounts and retain cancellation, deadlines,
+scoped cooldowns and concurrency limits until the response completes. Permission
+denials without a structured quota diagnosis do not trigger this behavior.
+
+This does not sign the IDE into another Google account: it changes only which
+explicitly authorized pool account handles the retry. The original IDE login
+remains separate from the proxy's saved account pool.
 
 The addon does not bundle the Antigravity OAuth client profile. It reads that
 profile from the recognized installed app without executing vendor code or

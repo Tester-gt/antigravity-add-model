@@ -7,7 +7,7 @@ import { AddressInfo } from 'node:net';
 import { ModelStore, normalizeModelConfig } from '../modelStore';
 import { createModelManager, modelListUrl, requestJson } from '../modelManagement';
 import { GoogleLoginOptions } from '../googleOAuth';
-import { GoogleAccount } from '../googleAccounts';
+import { GoogleAccount, acquireGoogleAccount, getGooglePoolStatus, resetGoogleAccountState } from '../googleAccounts';
 import { detectModelCapabilities } from '../proxy/modelUtils';
 
 const codec = {
@@ -43,6 +43,74 @@ const googleEntry = {
   externalModelName: 'gemini-test',
   apiKey: '',
 };
+describe('Google fleet account actions', () => {
+  it('preserves live concurrency and cooldown state when preferring or editing pool options', async () => {
+    resetGoogleAccountState();
+    const { manager } = setup();
+    const account = { id: 'busy-account', accessToken: 'valid-fixture-token', expiresAt: Date.now() + 3600000 };
+    manager.saveModel({ ...googleEntry, googleAccounts: [account], googlePool: { maxConcurrency: 1 } });
+    const lease = await acquireGoogleAccount(googleEntry.name, [account], { maxConcurrency: 1 });
+    manager.googleSelectAccount({ modelName: googleEntry.name, accountId: account.id });
+    manager.saveModel({ ...manager.store.list()[0], googlePool: { preferredAccountId: account.id, maxConcurrency: 1, strategy: 'adaptive' } });
+    expect(getGooglePoolStatus().find(value => value.id === account.id)?.inFlight).toBe(1);
+    await expect(acquireGoogleAccount(googleEntry.name, [account], { maxConcurrency: 1 })).rejects.toThrow(/eligible/);
+    lease.release({ status: 429, retryAfterMs: 60000 });
+    manager.googleSelectAccount({ modelName: googleEntry.name, accountId: account.id });
+    await expect(acquireGoogleAccount(googleEntry.name, [account], { preferredAccountId: account.id })).rejects.toThrow(/eligible/);
+    resetGoogleAccountState();
+  });
+  it('reconnects the selected pool using new pending tokens and preserves other pools', async () => {
+    const { directory } = setup();
+    const fresh = { id: 'new-login-id', email: 'same@example.com', label: 'same@example.com', accessToken: 'new-access', refreshToken: 'new-refresh', clientId: 'fixture.apps.googleusercontent.com', expiresAt: Date.now() + 3600000 };
+    const manager = createModelManager(directory, codec, async () => {}, { loginGoogleAccount: async () => fresh });
+    for (const name of ['models/first', 'models/second']) manager.saveModel({ ...googleEntry, name, customHeaders: { 'X-Private': 'keep-secret' }, googleAccounts: [
+      { ...fresh, id: 'saved-id', label: 'Work account', accessToken: 'revoked-access', refreshToken: 'revoked-refresh' },
+      { id: 'other', accessToken: 'other-access' },
+    ] });
+    const login = await manager.googleLogin({ clientId: fresh.clientId });
+    expect(login.account.refreshToken).toBe('********');
+    manager.googleLinkAccount({ modelName: 'models/first', accountId: login.account.id, replaceAccountId: 'saved-id' });
+    for (const model of manager.store.read()) {
+      const accounts = model.googleAccounts as GoogleAccount[];
+      expect(accounts[0].id).toBe('saved-id');
+      expect(accounts[0].label).toBe('Work account');
+      expect(codec.decryptString(accounts[0].refreshToken!)).toBe(model.name === 'models/first' ? 'new-refresh' : 'revoked-refresh');
+      expect(codec.decryptString(accounts[1].accessToken!)).toBe('other-access');
+      expect(codec.decryptString((model.customHeaders as Record<string, string>)['X-Private'])).toBe('keep-secret');
+    }
+  });
+  it('deduplicates matching emails and scopes preference and removal to the selected pool', async () => {
+    const { directory } = setup();
+    const account = { id: 'pending', email: 'SAME@example.com', accessToken: 'new-access', clientId: 'fixture.apps.googleusercontent.com', expiresAt: Date.now() + 3600000 };
+    const manager = createModelManager(directory, codec, async () => {}, { loginGoogleAccount: async () => account });
+    manager.saveModel({ ...googleEntry, googleAccounts: [{ id: 'saved', email: 'same@example.com', accessToken: 'old-access' }, { id: 'standby', accessToken: 'standby-token' }] });
+    manager.saveModel({ ...googleEntry, name: 'models/last', googleAccounts: [{ id: 'saved', email: 'same@example.com', accessToken: 'old-access' }] });
+    const login = await manager.googleLogin({ clientId: account.clientId });
+    manager.googleLinkAccount({ modelName: googleEntry.name, accountId: login.account.id });
+    expect((manager.store.read()[0].googleAccounts as GoogleAccount[])).toHaveLength(2);
+    manager.googleSelectAccount({ modelName: googleEntry.name, accountId: 'saved' });
+    expect((manager.store.read()[0].googlePool as { preferredAccountId: string }).preferredAccountId).toBe('saved');
+    expect(manager.store.read()[1].googlePool).toBeUndefined();
+    manager.googleRemoveAccount({ modelName: 'models/last', accountId: 'saved' });
+    expect(manager.store.read()[1].enabled).toBe(false);
+    expect((manager.store.read()[0].googleAccounts as GoogleAccount[]).some(value => value.id === 'saved')).toBe(true);
+    expect(manager.store.read()[1].googleAccounts).toEqual([]);
+    expect((manager.store.read()[1].googlePool as { preferredAccountId?: string }).preferredAccountId).toBeUndefined();
+  });
+  it('does not partially write a fleet link when one pool exceeds its account limit', async () => {
+    const { directory } = setup();
+    const account = { id: 'pending', accessToken: 'new-access', clientId: 'fixture.apps.googleusercontent.com', expiresAt: Date.now() + 3600000 };
+    const manager = createModelManager(directory, codec, async () => {}, { loginGoogleAccount: async () => account });
+    manager.saveModel({ ...googleEntry, googleAccounts: [{ id: 'old', accessToken: 'old' }] });
+    manager.saveModel({ ...googleEntry, name: 'models/full', googleAccounts: Array.from({ length: 50 }, (_, i) => ({ id: `account-${i}`, accessToken: 'token' })) });
+    const before = fs.readFileSync(manager.store.filename, 'utf8');
+    const login = await manager.googleLogin({ clientId: account.clientId });
+    expect(() => manager.googleLinkAccount({ modelName: 'models/full', accountId: login.account.id })).toThrow(/50 accounts/);
+    expect(fs.readFileSync(manager.store.filename, 'utf8')).toBe(before);
+    expect(() => manager.googleLinkAccount({ modelName: googleEntry.name, accountId: 'missing-login' })).toThrow(/expired/);
+    expect(() => manager.googleRemoveAccount({ modelName: googleEntry.name, accountId: 'missing' })).toThrow(/No saved/);
+  });
+});
 afterEach(async () => {
   await Promise.all(
     servers.splice(0).map(

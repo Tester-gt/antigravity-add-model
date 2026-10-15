@@ -1140,6 +1140,63 @@ describe('real upstream HTTP routing', () => {
     expect(getGooglePoolStatus()).toContainEqual(expect.objectContaining({ id: 'forbidden', status: 'forbidden' }));
   });
 
+  it('keeps structured HTTP 403 quota exhaustion scoped to its model instead of forbidding the account', async () => {
+    const captured: string[] = [];
+    const upstream = await serve(async (req, res) => {
+      const payload = await body(req);
+      captured.push(`${req.headers.authorization}:${payload.model}`);
+      if (req.headers.authorization === 'Bearer limited' && payload.model === 'gemini-pro') {
+        res.writeHead(403);
+        res.end(
+          JSON.stringify({
+            error: {
+              status: 'RESOURCE_EXHAUSTED',
+              message: 'private-prompt',
+              details: [
+                { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'DAILY_LIMIT_EXCEEDED' },
+                { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '2s' },
+              ],
+            },
+          }),
+        );
+      } else
+        res.end(
+          JSON.stringify({ response: { candidates: [{ content: { role: 'model', parts: [{ text: 'allowed' }] } }] } }),
+        );
+    });
+    const limited = { id: 'limited', accessToken: 'limited' };
+    const url = await proxy([
+      model(upstream, {
+        provider: 'google-cloudcode',
+        externalModelName: 'gemini-pro',
+        googleAccounts: [limited, { id: 'available', accessToken: 'available' }],
+      }),
+    ]);
+    const response = await fetch(url);
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain('private-prompt');
+    expect(captured).toEqual(['Bearer limited:gemini-pro', 'Bearer available:gemini-pro']);
+    expect(getGooglePoolStatus()).toContainEqual(
+      expect.objectContaining({
+        id: 'limited',
+        lastStatus: 403,
+        modelCooldowns: [expect.objectContaining({ modelName: 'gemini-pro', reason: 'quota-exhausted' })],
+      }),
+    );
+    expect(getGooglePoolStatus().find((state) => state.id === 'limited')?.status).not.toBe('forbidden');
+    const otherModel = await proxy([
+      model(upstream, {
+        provider: 'google-cloudcode',
+        externalModelName: 'gemini-flash',
+        googleAccounts: [limited],
+      }),
+    ]);
+    const otherResponse = await fetch(otherModel);
+    expect(otherResponse.status).toBe(200);
+    await otherResponse.text();
+    expect(captured.at(-1)).toBe('Bearer limited:gemini-flash');
+  });
+
   it('uses structured Google retry hints, records measured account health and never exposes upstream secrets', async () => {
     const started = Date.now();
     const upstream = await serve((req, res) => {

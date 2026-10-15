@@ -53,6 +53,7 @@ const shared_1 = require("./shared");
 const utils_1 = require("./translators/utils");
 const subagentRouting_1 = require("./subagentRouting");
 const subagentModels_1 = require("./subagentModels");
+const googlePoolFailover_1 = require("./googlePoolFailover");
 const circuits = new circuitBreaker_1.CircuitBreaker();
 const controllers = new Set();
 const counts = {
@@ -295,6 +296,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
             let modelFailed = false;
             const retries = kind === 'generation-test' ? 0 : Math.min(5, Math.max(0, model.maxRetries ?? 3));
             const cloudCode = model.provider === 'google-cloudcode';
+            const opencode = !cloudCode && (0, providers_1.isOpencodeEndpoint)(model.apiUrl, model.provider);
             const accountCount = cloudCode && kind !== 'generation-test'
                 ? (model.googleAccounts || []).filter((account) => account.enabled !== false).length
                 : 0;
@@ -338,7 +340,7 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                         url = new URL(target);
                         if (!['http:', 'https:'].includes(url.protocol))
                             throw new Error('Unsupported endpoint protocol');
-                        headers = registry.getProviderHeaders(model.provider, cloudCode ? '' : model.apiKey, format);
+                        headers = registry.getProviderHeaders(model.provider, cloudCode ? '' : model.apiKey, format, model.apiUrl);
                         if (accountLease) {
                             url = new URL((0, googleAccounts_1.googleAccountEndpoint)(accountLease.account, model.apiUrl));
                             if (accountLease.account.authMode === 'antigravity' && !accountLease.account.project)
@@ -350,9 +352,13 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                             const project = accountLease.account.project || model.googleProject;
                             payload = { model: externalName, ...(project ? { project } : {}), request: payload };
                         }
-                        if (['opencode', 'zen', 'opencode-go'].includes(model.provider)) {
+                        if (opencode) {
                             const identity = originalBody.sessionId || originalBody.conversationId;
-                            headers['x-opencode-session'] = typeof identity === 'string' ? identity : requestId;
+                            // Preserve conversation affinity without putting arbitrary Unicode or control characters in a header.
+                            headers['x-opencode-session'] =
+                                typeof identity === 'string' && identity.trim()
+                                    ? (0, crypto_1.createHash)('sha256').update(identity).digest('hex')
+                                    : requestId;
                         }
                         if (model.gateway) {
                             const identity = originalBody.conversationId || originalBody.sessionId;
@@ -387,14 +393,25 @@ async function runCustomModelRequest(res, primary, originalBody, isStream, allMo
                     headerLatencyMs = Date.now() - upstreamStartedAt;
                     const status = upstream.statusCode || 502;
                     if (status < 200 || status >= 300) {
-                        const errorBody = status === 400 || status === 422 || (cloudCode && status === 429) ? await boundedErrorBody(upstream) : '';
-                        const decision = cloudCode && status === 429
+                        const errorBody = status === 400 ||
+                            status === 422 ||
+                            (cloudCode && [403, 429].includes(status)) ||
+                            (opencode && [401, 403].includes(status))
+                            ? await boundedErrorBody(upstream)
+                            : '';
+                        const decision = cloudCode && (0, googlePoolFailover_1.isGoogleQuotaFailure)(status, errorBody)
                             ? (0, googlePoolPolicy_1.classifyGoogleRateLimit)(errorBody, upstream.headers['retry-after'])
                             : undefined;
                         const retryAfter = decision?.retryAfterMs ?? (0, requestOptions_1.parseRetryAfter)(upstream.headers['retry-after']);
                         const hint = status === 400 || status === 422 ? toolSchemaErrorHint(errorBody) : '';
                         upstream.destroy();
-                        throw new UpstreamError(`${cloudCode ? (0, googleAccessErrors_1.describeGoogleAccessError)(status).message : `Upstream returned HTTP ${status}.`}${hint}`, status, status === 408 || status === 429 || status >= 500, retryAfter, status !== 400 && status !== 422, decision);
+                        throw new UpstreamError(`${cloudCode
+                            ? decision && status === 403
+                                ? 'Google Cloud Code reported a rate or quota limit (HTTP 403). Respect the provider retry/reset delay; signing in again does not increase quota.'
+                                : (0, googleAccessErrors_1.describeGoogleAccessError)(status).message
+                            : opencode && [401, 403].includes(status)
+                                ? (0, providers_1.describeOpencodeAccessError)(status, errorBody)
+                                : `Upstream returned HTTP ${status}.`}${hint}`, status, !!decision || status === 408 || status === 429 || status >= 500, retryAfter, status !== 400 && status !== 422, decision);
                     }
                     if (isStream && String(upstream.headers['content-type']).includes('text/event-stream')) {
                         const decoder = new string_decoder_1.StringDecoder('utf8');

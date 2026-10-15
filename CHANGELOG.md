@@ -2,6 +2,13 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Account quota controls and model search
+
+- Add grouped Google quota cards with supplied reset times to desktop settings and the IDE web manager, plus per-pool preferred-account, reconnect and removal actions. Preserve new OAuth tokens during reconnect and retain the owning model when querying accounts across multiple pools.
+- Add opt-in native quota failover through one explicitly configured matching pool. Preserve upstream-model quota scope, account concurrency until stream completion, bounded deadlines and cancellation, including interrupted responses and proxy shutdown.
+- Add keyboard search to the standalone model dropdown.
+- Update OpenCode discovery and keyless requests to the documented inference API. Preserve saved endpoints and real tool declarations, scope provider-specific handling correctly, and report service restrictions without pretending successful generation. The current public free endpoint returned a client-restriction 403 in live testing; see [OpenCode setup](docs/providers.md#opencode-and-keyless-requests).
+
 ### Unreleased — Windows update blockers and bounded shutdown
 
 - Follow up on [issue #22](https://github.com/vahapogut/antigravity-add-model/issues/22): bound the proxy's shutdown drain, cancel its unfinished upstream requests, and signal the legacy desktop language server concurrently. Cancel pending language-server startup when shutdown begins, so unfinished requests or a late spawn cannot leave that quit path hanging.

@@ -95,6 +95,7 @@ const subagentRouting_1 = require("./proxy/subagentRouting");
 const subagentModels_1 = require("./proxy/subagentModels");
 const loopbackSecurity_1 = require("./proxy/loopbackSecurity");
 const nativeSubagentResponse_1 = require("./proxy/nativeSubagentResponse");
+const googlePoolFailover_1 = require("./proxy/googlePoolFailover");
 let languageServerPortResolver;
 let languageServerRoutingEnabled = false;
 /** Registered by the desktop with its own live language-server port getter. */
@@ -449,10 +450,13 @@ function forwardToGoogle(req, res, reqBody, nativeSubagent, cloudCodeOrigin) {
     headers['content-length'] = String(reqBody.length);
     const isGeneration = req.url.includes('generateContent') || req.url.includes('streamGenerateContent');
     const shouldBufferAndModify = isCloudCodeUrl && !isGeneration;
+    const failoverEnabled = isCloudCodeUrl && isGeneration && !!(0, googlePoolFailover_1.resolveGoogleFailoverPool)(loadCustomModels(), reqBody);
     if (shouldBufferAndModify) {
         delete headers['accept-encoding'];
     }
     if (nativeSubagent)
+        headers['accept-encoding'] = 'identity';
+    if (failoverEnabled)
         headers['accept-encoding'] = 'identity';
     const options = {
         method: req.method,
@@ -470,6 +474,47 @@ function forwardToGoogle(req, res, reqBody, nativeSubagent, cloudCodeOrigin) {
         res.end(JSON.stringify({ error: { message } }));
     };
     const proxyReq = https.request(parsedUrl, options, (proxyRes) => {
+        if (failoverEnabled && (proxyRes.statusCode === 429 || proxyRes.statusCode === 403)) {
+            const chunks = [];
+            let bytes = 0;
+            let interrupted = false;
+            const failErrorBody = () => {
+                if (interrupted)
+                    return;
+                interrupted = true;
+                failForwarding(502, 'Google quota response was interrupted.');
+                proxyRes.destroy();
+            };
+            proxyRes.once('error', failErrorBody);
+            proxyRes.once('aborted', failErrorBody);
+            proxyRes.on('data', (chunk) => {
+                bytes += chunk.length;
+                if (bytes > 64 * 1024)
+                    failErrorBody();
+                else
+                    chunks.push(chunk);
+            });
+            proxyRes.once('end', () => {
+                if (interrupted)
+                    return;
+                const original = Buffer.concat(chunks);
+                void (0, googlePoolFailover_1.attemptGooglePoolFailover)(req, res, reqBody, proxyRes, original.toString('utf8'), {
+                    loadCustomModels,
+                    forwardingHeaders,
+                    trackUpstream,
+                    isStopping: () => !!stoppingProxy,
+                    log: electron_log_1.default,
+                }, nativeSubagent, cloudCodeOrigin || targetUrl).then((handled) => {
+                    if (handled || stoppingProxy || res.destroyed || res.writableEnded)
+                        return;
+                    const responseHeaders = forwardingHeaders(proxyRes.headers);
+                    responseHeaders['content-length'] = String(original.length);
+                    res.writeHead(proxyRes.statusCode || 429, responseHeaders);
+                    res.end(original);
+                }).catch(() => failForwarding(502, 'Google account failover failed.'));
+            });
+            return;
+        }
         if (nativeSubagent && isGeneration) {
             nativeResponse = proxyRes;
             const streamHint = req.url.includes('streamGenerateContent') || req.url.includes('alt=sse');

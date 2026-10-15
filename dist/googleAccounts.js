@@ -40,6 +40,7 @@ exports.refreshGoogleAccount = refreshGoogleAccount;
 exports.fetchGoogleQuota = fetchGoogleQuota;
 exports.fetchGoogleModels = fetchGoogleModels;
 exports.acquireGoogleAccount = acquireGoogleAccount;
+exports.recordGoogleAccountFailure = recordGoogleAccountFailure;
 exports.getGooglePoolStatus = getGooglePoolStatus;
 exports.resetGoogleAccountState = resetGoogleAccountState;
 /** Google Cloud Code account pools. OAuth applications and credentials are supplied by the user. */
@@ -47,6 +48,7 @@ const http = __importStar(require("http"));
 const https = __importStar(require("https"));
 const crypto_1 = require("crypto");
 const googleAccessErrors_1 = require("./googleAccessErrors");
+const googleOAuth_1 = require("./googleOAuth");
 /** A consistent identifier for this application across Cloud Code account and generation requests. */
 exports.GOOGLE_CLOUD_CODE_USER_AGENT = 'antigravity-add-model';
 class GoogleAccountError extends Error {
@@ -109,23 +111,47 @@ function quotaIsFresh(quota, now = Date.now()) {
         now - quota.checkedAt < MEASUREMENT_TTL_MS &&
         !quota.buckets.some((bucket) => bucket.resetTime && Date.parse(bucket.resetTime) <= now));
 }
-function quotaExhausted(state, now = Date.now()) {
-    // A depleted Claude bucket must not disable an account with remaining Gemini quota.
-    return (quotaIsFresh(state.quota, now) &&
-        !!state.quota?.buckets.length &&
-        state.quota.buckets.every((bucket) => bucket.remainingFraction === 0));
+function quotaBuckets(quota, upstreamModel) {
+    const family = (name) => /claude|gpt|anthropic|openai|third[- ]?party/i.test(name)
+        ? 'third-party'
+        : /gemini|google/i.test(name)
+            ? 'gemini'
+            : undefined;
+    const wanted = upstreamModel ? family(upstreamModel) : undefined;
+    if (!wanted)
+        return quota.buckets;
+    const classified = quota.buckets.map((bucket) => ({
+        bucket,
+        family: family(`${bucket.groupName || ''} ${bucket.id} ${bucket.displayName || ''}`),
+    }));
+    // Missing family information is unknown eligibility, not proof that the account lacks access.
+    return classified.some((entry) => entry.family)
+        ? classified.filter((entry) => entry.family === wanted).map((entry) => entry.bucket)
+        : quota.buckets;
+}
+function quotaFraction(state, upstreamModel, now = Date.now()) {
+    if (!quotaIsFresh(state.quota, now) || !state.quota)
+        return undefined;
+    const values = quotaBuckets(state.quota, upstreamModel).flatMap((bucket) => bucket.remainingFraction === undefined ? [] : [bucket.remainingFraction]);
+    return values.length ? Math.min(...values) : undefined;
+}
+function quotaExhausted(state, now = Date.now(), upstreamModel) {
+    if (!quotaIsFresh(state.quota, now) || !state.quota)
+        return false;
+    const buckets = quotaBuckets(state.quota, upstreamModel);
+    return buckets.length > 0 && buckets.every((bucket) => bucket.remainingFraction === 0);
 }
 function measuredLatency(state, now = Date.now()) {
     return state.latency && now - state.latency.measuredAt < MEASUREMENT_TTL_MS ? state.latency.average : undefined;
 }
-function adaptiveScore(state) {
-    const quota = quotaIsFresh(state.quota) ? state.quota?.remainingFraction : undefined;
+function adaptiveScore(state, modelName) {
+    const quota = quotaFraction(state, modelName);
     return ((quota ?? 0.5) * 100 -
         state.inFlight * 20 -
         Math.min(40, (measuredLatency(state) ?? 0) / 100) -
         Math.min(30, state.consecutiveFailures * 10));
 }
-function selectAdaptive(candidates) {
+function selectAdaptive(candidates, modelName) {
     if (candidates.length < 2)
         return candidates[0];
     const first = (0, crypto_1.randomInt)(candidates.length);
@@ -133,7 +159,7 @@ function selectAdaptive(candidates) {
     if (second >= first)
         second++;
     const a = stateFor(candidates[first]), b = stateFor(candidates[second]);
-    const difference = adaptiveScore(a) - adaptiveScore(b);
+    const difference = adaptiveScore(a, modelName) - adaptiveScore(b, modelName);
     return difference > 0 || (difference === 0 && a.lastUsed <= b.lastUsed) ? candidates[first] : candidates[second];
 }
 function validAccess(account) {
@@ -260,7 +286,7 @@ async function refreshGoogleAccount(account, tokenEndpointOverride = 'https://oa
     return refresh;
 }
 /** Explicit quota refresh; never infers subscription eligibility or fabricates an available quota. */
-async function fetchGoogleQuota(account, baseURL) {
+async function fetchGoogleQuota(account, baseURL, options = {}) {
     const endpoint = new URL(googleAccountEndpoint(account, baseURL));
     endpoint.pathname = '/v1internal:retrieveUserQuotaSummary';
     endpoint.search = '';
@@ -273,25 +299,123 @@ async function fetchGoogleQuota(account, baseURL) {
     if (status < 200 || status >= 300)
         throw new GoogleAccountError((0, googleAccessErrors_1.describeGoogleAccessError)(status, 'quota').message, status);
     const buckets = [];
-    const groups = Array.isArray(data.groups) ? data.groups : [{ buckets: data.buckets }];
-    for (const group of groups) {
+    const groups = [];
+    const rawGroups = Array.isArray(data.groups)
+        ? data.groups
+        : Array.isArray(data.buckets)
+            ? [{ buckets: data.buckets }]
+            : [];
+    for (const group of rawGroups) {
+        if (!group || typeof group !== 'object')
+            continue;
+        const groupName = typeof group.displayName === 'string' && group.displayName.trim()
+            ? group.displayName.trim()
+            : typeof group.name === 'string' && group.name.trim()
+                ? group.name.trim()
+                : typeof group.title === 'string' && group.title.trim()
+                    ? group.title.trim()
+                    : typeof group.label === 'string' && group.label.trim()
+                        ? group.label.trim()
+                        : typeof group.id === 'string' && group.id.trim()
+                            ? group.id.trim()
+                            : undefined;
+        const groupBuckets = [];
         for (const bucket of Array.isArray(group?.buckets) ? group.buckets : []) {
             if (!bucket || typeof bucket !== 'object')
                 continue;
-            buckets.push({
-                id: typeof bucket.bucketId === 'string' ? bucket.bucketId : typeof bucket.id === 'string' ? bucket.id : 'quota',
-                remainingFraction: typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction)
-                    ? Math.max(0, Math.min(1, bucket.remainingFraction))
-                    : undefined,
-                resetTime: typeof bucket.resetTime === 'string' ? bucket.resetTime : undefined,
+            const bId = typeof bucket.bucketId === 'string' ? bucket.bucketId : typeof bucket.id === 'string' ? bucket.id : 'quota';
+            const bDisplayName = typeof bucket.displayName === 'string'
+                ? bucket.displayName
+                : typeof bucket.title === 'string'
+                    ? bucket.title
+                    : typeof bucket.label === 'string'
+                        ? bucket.label
+                        : undefined;
+            const bFraction = typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction)
+                ? Math.max(0, Math.min(1, bucket.remainingFraction))
+                : undefined;
+            const bReset = typeof bucket.resetTime === 'string' ? bucket.resetTime : undefined;
+            const item = {
+                id: bId,
+                ...(bDisplayName ? { displayName: bDisplayName } : {}),
+                ...(groupName ? { groupName } : {}),
+                remainingFraction: bFraction,
+                resetTime: bReset,
+            };
+            groupBuckets.push(item);
+            buckets.push(item);
+        }
+        if (groupBuckets.length > 0 || groupName) {
+            groups.push({
+                name: groupName || 'Models',
+                displayName: groupName || 'Models',
+                buckets: groupBuckets,
             });
         }
     }
     const remaining = buckets.flatMap((bucket) => bucket.remainingFraction === undefined ? [] : [bucket.remainingFraction]);
+    const paidTier = data.paidTier && typeof data.paidTier === 'object' ? data.paidTier : undefined;
+    const quotaUser = data.user && typeof data.user === 'object' ? data.user : undefined;
+    const rawTier = typeof data?.subscriptionTier === 'string'
+        ? data.subscriptionTier
+        : typeof data?.userTier === 'string'
+            ? data.userTier
+            : typeof data?.planTier === 'string'
+                ? data.planTier
+                : typeof paidTier?.tier === 'string'
+                    ? paidTier.tier
+                    : undefined;
+    let planTier;
+    if (rawTier) {
+        const lower = rawTier.toLowerCase();
+        if (lower.includes('enterprise'))
+            planTier = 'Enterprise';
+        else if (lower.includes('trial'))
+            planTier = 'Pro Trial';
+        else if (lower.includes('pro'))
+            planTier = 'Pro';
+        else if (lower.includes('free'))
+            planTier = 'Free';
+        else
+            planTier = rawTier.charAt(0).toUpperCase() + rawTier.slice(1);
+    }
+    let email = account.email ||
+        (typeof data.userEmail === 'string'
+            ? data.userEmail
+            : typeof data.email === 'string'
+                ? data.email
+                : typeof quotaUser?.email === 'string'
+                    ? quotaUser.email
+                    : undefined);
+    let name;
+    if (!email &&
+        current.accessToken &&
+        options.includeIdentity &&
+        (options.fetchUserInfo || endpoint.hostname.endsWith('.googleapis.com'))) {
+        try {
+            const info = await (options.fetchUserInfo || googleOAuth_1.fetchGoogleUserInfo)(current.accessToken, options.signal);
+            if (info.email)
+                email = info.email;
+            if (info.name)
+                name = info.name;
+        }
+        catch { }
+    }
+    if (email && !account.email) {
+        account.email = email;
+    }
+    if (email && (!account.label || account.label.toLowerCase() === 'google account')) {
+        account.label = email;
+        stateFor(account).label = email;
+    }
     const snapshot = {
         accountId: account.id,
         checkedAt: Date.now(),
+        planTier,
+        ...(email ? { email } : {}),
+        ...(name ? { name } : {}),
         buckets,
+        ...(groups.length > 0 ? { groups } : {}),
         remainingFraction: remaining.length ? Math.min(...remaining) : undefined,
     };
     stateFor(account).quota = snapshot;
@@ -347,7 +471,7 @@ async function acquireGoogleAccount(modelName, accounts, options = {}, requestId
                 !state.authState &&
                 state.cooldownUntil <= now &&
                 (state.modelCooldowns.get(cooldownScope)?.until ?? 0) <= now &&
-                !quotaExhausted(state, now) &&
+                !quotaExhausted(state, now, cooldownScope) &&
                 state.inFlight < (options.maxConcurrency ?? 2));
         });
         candidates = candidates.sort((left, right) => {
@@ -355,15 +479,20 @@ async function acquireGoogleAccount(modelName, accounts, options = {}, requestId
             if (options.strategy === 'least-loaded' && a.inFlight !== b.inFlight)
                 return a.inFlight - b.inFlight;
             if (options.strategy === 'quota') {
-                const qa = (quotaIsFresh(a.quota) ? a.quota?.remainingFraction : undefined) ?? 0.5, qb = (quotaIsFresh(b.quota) ? b.quota?.remainingFraction : undefined) ?? 0.5;
+                const qa = quotaFraction(a, cooldownScope, now) ?? 0.5, qb = quotaFraction(b, cooldownScope, now) ?? 0.5;
                 if (qa !== qb)
                     return qb - qa;
             }
             return a.lastUsed - b.lastUsed;
         });
         const stick = identityKey ? sticky.get(identityKey) : undefined;
-        const selected = candidates.find((account) => poolKey(account) === stick?.accountKey) ||
-            (options.strategy === 'adaptive' ? selectAdaptive(candidates) : candidates[0]);
+        const stickyCandidate = stick ? candidates.find((account) => poolKey(account) === stick.accountKey) : undefined;
+        const eligibleSticky = stickyCandidate && stateFor(stickyCandidate).consecutiveFailures === 0 && !stateFor(stickyCandidate).authState
+            ? stickyCandidate
+            : undefined;
+        const selected = candidates.find((account) => account.id === options.preferredAccountId) ||
+            eligibleSticky ||
+            (options.strategy === 'adaptive' ? selectAdaptive(candidates, cooldownScope) : candidates[0]);
         if (!selected)
             throw new GoogleAccountError('No Google account is currently eligible: check authentication, quota, cooldown and concurrency limits.', 503);
         const key = poolKey(selected), state = stateFor(selected);
@@ -378,7 +507,7 @@ async function acquireGoogleAccount(modelName, accounts, options = {}, requestId
                 await persistAccount?.(modelName, updated, selected);
             }
             if (identityKey)
-                sticky.set(identityKey, { accountKey: key, at: Date.now() });
+                sticky.set(identityKey, { accountKey: key, accountId: selected.id, at: Date.now() });
             state.requests++;
             let released = false;
             return {
@@ -407,12 +536,25 @@ async function acquireGoogleAccount(modelName, accounts, options = {}, requestId
                         state.failed++;
                         state.consecutiveFailures++;
                     }
-                    if (result.status === 401 || result.status === 403) {
+                    const quotaDenial = result.status === 403 &&
+                        (result.cooldownReason === 'quota-exhausted' || result.cooldownReason === 'rate-limited');
+                    if (result.status === 401 || (result.status === 403 && !quotaDenial)) {
                         state.authState = result.status === 401 ? 'unauthorized' : 'forbidden';
                         tokenCache.delete(accountKey(selected));
                         tokenCache.delete(accountKey(updated));
+                        for (const [sKey, entry] of sticky) {
+                            if (entry.accountId === selected.id || entry.accountKey === key)
+                                sticky.delete(sKey);
+                        }
                     }
-                    else if (result.status === 408 || result.status === 429 || (result.status && result.status >= 500)) {
+                    else if (quotaDenial ||
+                        result.status === 408 ||
+                        result.status === 429 ||
+                        (result.status && result.status >= 500)) {
+                        for (const [sKey, entry] of sticky) {
+                            if (entry.accountId === selected.id || entry.accountKey === key)
+                                sticky.delete(sKey);
+                        }
                         const delay = Number.isFinite(result.retryAfterMs) && result.retryAfterMs >= 0
                             ? result.retryAfterMs
                             : (options.cooldownMs ?? 60000);
@@ -438,6 +580,32 @@ async function acquireGoogleAccount(modelName, accounts, options = {}, requestId
     }
     throw new GoogleAccountError('No Google account could authenticate; reconnect an account or check its OAuth client configuration.', 401);
 }
+function recordGoogleAccountFailure(account, status, retryAfterMs, cooldownScope, reason) {
+    const state = stateFor(account);
+    state.failed++;
+    state.consecutiveFailures++;
+    state.lastStatus = status;
+    for (const [sKey, entry] of sticky) {
+        if (entry.accountId === account.id || entry.accountKey === poolKey(account))
+            sticky.delete(sKey);
+    }
+    const quotaDenial = status === 403 && (reason === 'quota-exhausted' || reason === 'rate-limited');
+    if (status === 401 || (status === 403 && !quotaDenial)) {
+        state.authState = status === 401 ? 'unauthorized' : 'forbidden';
+        tokenCache.delete(accountKey(account));
+    }
+    else if (quotaDenial || status === 408 || status === 429 || (status && status >= 500)) {
+        const delay = Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? retryAfterMs : 60000;
+        const until = Date.now() + Math.min(delay, 31 * 24 * 60 * 60 * 1000);
+        const scope = cooldownScope || 'global';
+        if (until >= (state.modelCooldowns.get(scope)?.until ?? 0)) {
+            state.modelCooldowns.set(scope, {
+                until,
+                reason: reason || (status === 429 ? 'rate-limited' : 'upstream-error'),
+            });
+        }
+    }
+}
 function getGooglePoolStatus() {
     const now = Date.now();
     return [...poolStates.values()].map((state) => {
@@ -458,7 +626,13 @@ function getGooglePoolStatus() {
             failed: state.failed,
             avgLatencyMs: measuredLatency(state, now),
             lastStatus: state.lastStatus,
-            lastError: state.lastStatus >= 400 ? (0, googleAccessErrors_1.describeGoogleAccessError)(state.lastStatus) : undefined,
+            lastError: state.lastStatus >= 400
+                ? (0, googleAccessErrors_1.describeGoogleAccessError)(state.lastStatus === 403 &&
+                    !state.authState &&
+                    modelCooldowns.some((cooldown) => cooldown.reason === 'rate-limited' || cooldown.reason === 'quota-exhausted')
+                    ? 429
+                    : state.lastStatus)
+                : undefined,
             quotaAgeMs: state.quota ? Math.max(0, now - state.quota.checkedAt) : undefined,
             quotaFresh: quotaIsFresh(state.quota, now),
             quotaExhausted: quotaExhausted(state, now),
@@ -477,6 +651,12 @@ function resetGoogleAccountState(id) {
     if (!id) {
         tokenCache.clear();
         sticky.clear();
+    }
+    else {
+        for (const [key, entry] of sticky) {
+            if (entry.accountId === id || entry.accountKey === id)
+                sticky.delete(key);
+        }
     }
 }
 //# sourceMappingURL=googleAccounts.js.map

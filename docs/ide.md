@@ -89,6 +89,33 @@ The manager's optional Google account pool is separate from the IDE's own login.
 It uses the [explicit account setup](configuration.md#google-cloud-code-account-pools)
 described in the configuration guide.
 
+The web manager also shows grouped account quotas/reset times, reconnect
+actions, preferred-account selection and the optional matching-pool native
+failover setting. See [quota controls](configuration.md#quota-panel-and-preferred-accounts).
+The addon search field inside the standalone application's model dropdown is
+specific to that renderer; the IDE retains its own native picker. Saved models
+are injected into that native picker through the catalog as described below.
+
+Verified on Windows Antigravity IDE 2.5.5 on **2026-10-15**:
+
+- A saved local OpenAI-compatible model appeared in the native picker and its
+  streamed response reached the chat. A model ID ending in `-free` stayed on its
+  configured local provider.
+- A real OpenRouter `nvidia/nemotron-3.5-lightning:free` request returned HTTP 200
+  and the correct arithmetic answer in the IDE.
+- The web manager loaded three quota entries from two controlled local test
+  pools. Selecting the second account as preferred routed the next IDE request
+  through that account and displayed its response.
+- OpenCode discovery returned 87 models, but a real keyless `big-pickle`
+  generation request returned the provider's client-restriction HTTP 403. The
+  IDE surfaced its generic execution error; the manager and provider guide
+  explain the restriction. Catalog access does not imply generation access.
+
+The Google pool check used local quota/account fixtures, not two live Google
+accounts. Native quota failover, OAuth reconnect, cancellation and interrupted
+streams are covered by automated tests; a two-account live Google quota
+exhaustion scenario was not exercised in this session.
+
 ## Native model identities and capacity
 
 IDE 2.5.5 builds its native picker from the Cloud Code model catalog and its

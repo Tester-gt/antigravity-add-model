@@ -94,6 +94,28 @@ export declare function createModelManager(directory: string, codec: SecretCodec
             quota: import("./googleAccounts").GoogleQuotaSnapshot;
         }[];
     };
+    googleLinkAccount(input: {
+        modelName: string;
+        accountId: string;
+        replaceAccountId?: string;
+    }): {
+        success: boolean;
+        count: number;
+    };
+    googleSelectAccount(input: {
+        modelName: string;
+        accountId: string;
+    }): {
+        success: boolean;
+        count: number;
+    };
+    googleRemoveAccount(input: {
+        modelName: string;
+        accountId: string;
+    }): {
+        success: boolean;
+        count: number;
+    };
     googlePrepareAccount(input: {
         modelName?: string;
         accountId?: string;

@@ -166,6 +166,7 @@ window.addEventListener('DOMContentLoaded', () => {
       .agy-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.agy-discovery{max-height:240px;overflow:auto;margin:12px 0}
       .agy-choice{display:flex;gap:10px;align-items:center;padding:7px 0;overflow-wrap:anywhere}.agy-choice span{min-width:0}
       #agy-modal-overlay details{border:1px solid #303036;border-radius:8px;margin:12px 0;padding:12px}#agy-modal-overlay summary{cursor:pointer;margin-bottom:10px;font-weight:500}
+      .agy-fleet{margin:18px 0;border:1px solid #303036;border-radius:8px;padding:14px}.agy-fleet-table-wrap{overflow:auto}.agy-fleet-table{width:100%;border-collapse:collapse;text-align:left}.agy-fleet-table th,.agy-fleet-table td{padding:10px 8px;border-bottom:1px solid #303036;vertical-align:top}.agy-fleet-table th{font-size:11px;color:#a1a1aa}.agy-quota-bucket{min-width:180px;margin-bottom:8px}.agy-quota-bucket progress{display:block;width:100%;height:7px;accent-color:#86efac}.agy-fleet-label{font-weight:600}.agy-pool-badge{display:inline-block;padding:2px 6px;border-radius:5px;background:#27272c;color:#a1a1aa;font-size:11px}.agy-pool-preferred{color:#86efac}.agy-model-search-box{padding:6px 8px}.agy-model-search-input{box-sizing:border-box;width:100%;font:inherit;color:inherit;background:transparent;border:1px solid #52525b;border-radius:5px;padding:6px}.agy-model-no-results{padding:8px;color:#a1a1aa;font-size:12px}
       @media(max-width:600px){.agy-grid{grid-template-columns:1fr}#agy-modal-card{padding:16px}.agy-row .agy-actions{width:100%}}
     `;
         document.head.append(style);
@@ -557,6 +558,188 @@ window.addEventListener('DOMContentLoaded', () => {
         }, status, true));
         body.append(actions);
     }
+    const quotaCache = new Map();
+    let fleetRefreshing = false;
+    let fleetTimer;
+    function fleetAccounts(models) {
+        const rows = new Map();
+        for (const model of models) {
+            if (model.provider !== 'google-cloudcode' || !Array.isArray(model.googleAccounts))
+                continue;
+            for (const account of model.googleAccounts) {
+                if (!account?.id)
+                    continue;
+                const key = `${model.name}\0${account.id}`;
+                const row = rows.get(key);
+                if (row)
+                    row.owners.push(model);
+                else
+                    rows.set(key, { account, owners: [model] });
+            }
+        }
+        return [...rows.values()];
+    }
+    function quotaKey(model, account) {
+        return JSON.stringify([model.name, account.id, account.project, account.authMode, account.cloudCodeEndpoint]);
+    }
+    async function connectFleetAccount(modelName, replaceAccountId) {
+        const { body, status, close } = openModal(replaceAccountId ? 'Reconnect Google account' : 'Add Google account');
+        body.append(element('p', 'agy-muted', `Complete Google sign-in in your browser. The account is saved to ${modelName}.`));
+        cancelModalOperation = () => { void electron_1.ipcRenderer.invoke('storage:google-login-cancel'); };
+        setStatus(status, 'Waiting for Google sign-in…');
+        try {
+            const result = await electron_1.ipcRenderer.invoke('storage:google-login', { authMode: 'antigravity' });
+            if (!body.isConnected)
+                return;
+            requireSuccess(result);
+            if (!result.account)
+                throw new Error('Google did not return an account.');
+            requireSuccess(await electron_1.ipcRenderer.invoke('storage:google-link-account', { modelName, accountId: result.account.id, ...(replaceAccountId ? { replaceAccountId } : {}) }));
+            quotaCache.clear();
+            cancelModalOperation = undefined;
+            close();
+            await modelsChanged();
+        }
+        catch (error) {
+            if (body.isConnected)
+                setStatus(status, error instanceof Error ? error.message : String(error), true);
+        }
+    }
+    function removeFleetAccount(account, modelName) {
+        const { body, status, close } = openModal('Remove Google account');
+        body.append(element('p', '', `Remove ${account.email || account.label || account.id} from ${modelName}? This model will be disabled if no enabled account remains. Other model pools and your IDE login are preserved.`));
+        body.append(button('Remove account', async () => {
+            requireSuccess(await electron_1.ipcRenderer.invoke('storage:google-remove-account', { modelName, accountId: account.id }));
+            quotaCache.clear();
+            close();
+            await modelsChanged();
+        }, status), button('Cancel', close));
+    }
+    async function refreshFleetQuotas(force = false) {
+        if (fleetRefreshing)
+            return;
+        const container = document.getElementById('agy-google-account-pool-section');
+        if (!container?.isConnected || container.hidden)
+            return;
+        const rows = fleetAccounts(modelList);
+        fleetRefreshing = true;
+        try {
+            // A small sequential queue avoids a login or quota request burst on large fleets.
+            for (const { account, owners } of rows) {
+                if (!container.isConnected)
+                    break;
+                const owner = owners[0];
+                const key = quotaKey(owner, account);
+                if (!force && Date.now() - (quotaCache.get(key)?.at || 0) < 120000)
+                    continue;
+                try {
+                    const result = await electron_1.ipcRenderer.invoke('storage:google-test-account', { modelName: owner.name, accountId: account.id });
+                    requireSuccess(result);
+                    quotaCache.set(key, { quota: result.quota, at: Date.now() });
+                }
+                catch (error) {
+                    quotaCache.set(key, { error: error instanceof Error ? error.message : String(error), at: Date.now() });
+                }
+            }
+        }
+        finally {
+            fleetRefreshing = false;
+            if (container.isConnected)
+                renderGoogleFleet();
+        }
+    }
+    function renderGoogleFleet() {
+        const container = document.getElementById('agy-google-account-pool-section');
+        if (!container)
+            return;
+        const rows = fleetAccounts(modelList);
+        const hasGoogleModels = modelList.some((model) => model.provider === 'google-cloudcode');
+        container.hidden = !hasGoogleModels;
+        container.replaceChildren();
+        if (!hasGoogleModels)
+            return;
+        const keys = new Set(rows.map(({ account, owners }) => quotaKey(owners[0], account)));
+        for (const key of quotaCache.keys())
+            if (!keys.has(key))
+                quotaCache.delete(key);
+        const header = element('div', 'agy-toolbar');
+        header.append(element('h3', '', `Google account fleet · ${rows.length} account entries`));
+        const actions = element('div', 'agy-actions');
+        const targetPool = element('select');
+        targetPool.id = 'agy-fleet-target-pool';
+        targetPool.setAttribute('aria-label', 'Pool for new Google account');
+        for (const model of modelList.filter((model) => model.provider === 'google-cloudcode')) {
+            const option = element('option', '', model.displayName || model.name);
+            option.value = model.name;
+            targetPool.append(option);
+        }
+        actions.append(targetPool);
+        const add = button('+ Add Account', () => connectFleetAccount(targetPool.value));
+        add.id = 'agy-pool-add-account-btn';
+        actions.append(add, button('Refresh quotas', () => refreshFleetQuotas(true)));
+        header.append(actions);
+        container.append(header, element('p', 'agy-muted', 'Preferred accounts are used when eligible; automatic selection handles unavailable accounts. Quotas are reported by Google for the displayed model/project. Unknown limits are not shown as available credit.'));
+        const wrap = element('div', 'agy-fleet-table-wrap');
+        const table = element('table', 'agy-fleet-table');
+        const head = element('thead');
+        const heading = element('tr');
+        for (const title of ['Account / models', 'Reported quotas', 'Selection', 'Actions'])
+            heading.append(element('th', '', title));
+        head.append(heading);
+        table.append(head);
+        const tbody = element('tbody');
+        for (const { account, owners } of rows) {
+            const owner = owners[0];
+            const cached = quotaCache.get(quotaKey(owner, account));
+            const row = element('tr');
+            row.dataset.accountId = account.id;
+            const identity = element('td');
+            identity.append(element('div', 'agy-fleet-label', account.email || cached?.quota?.email || account.label || account.id), element('div', 'agy-muted', owners.map((model) => model.displayName || model.name).join(', ')));
+            const quota = element('td');
+            const buckets = cached?.quota?.buckets || [];
+            if (cached?.quota?.planTier)
+                quota.append(element('div', 'agy-pool-badge', cached.quota.planTier));
+            if (cached?.error)
+                quota.append(element('div', 'agy-status agy-error', cached.error));
+            else if (!cached)
+                quota.append(element('span', 'agy-muted', 'Loading quota…'));
+            else if (!buckets.length)
+                quota.append(element('span', 'agy-muted', 'Quota unavailable — Google returned no buckets.'));
+            for (const bucket of buckets) {
+                const block = element('div', 'agy-quota-bucket');
+                const fraction = bucket.remainingFraction;
+                const known = typeof fraction === 'number' && Number.isFinite(fraction);
+                block.append(element('div', 'agy-muted', [bucket.groupName, bucket.displayName || bucket.id].filter(Boolean).join(' · ')));
+                block.append(element('div', '', known ? `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}% remaining` : 'Remaining quota unknown'));
+                if (known) {
+                    const bar = element('progress');
+                    bar.max = 1;
+                    bar.value = Math.max(0, Math.min(1, fraction));
+                    bar.setAttribute('aria-label', `${bucket.displayName || bucket.id} remaining quota`);
+                    block.append(bar);
+                }
+                if (bucket.resetTime && Number.isFinite(Date.parse(bucket.resetTime)))
+                    block.append(element('div', 'agy-muted', `Resets ${new Date(bucket.resetTime).toLocaleString()}`));
+                quota.append(block);
+            }
+            const selection = element('td');
+            const preferred = owners.filter((model) => model.googlePool?.preferredAccountId === account.id);
+            const enabled = owners.some((model) => model.enabled !== false && model.googleAccounts.some((entry) => entry.id === account.id && entry.enabled !== false));
+            selection.append(element('span', `agy-pool-badge${preferred.length ? ' agy-pool-preferred' : ''}`, !enabled ? 'Disabled' : preferred.length ? `Preferred in ${preferred.length} pool(s)` : 'Automatic'));
+            const rowActions = element('td');
+            const choose = button('Use preferred', async () => {
+                requireSuccess(await electron_1.ipcRenderer.invoke('storage:google-select-account', { modelName: owner.name, accountId: account.id }));
+                await modelsChanged();
+            });
+            choose.disabled = !enabled;
+            rowActions.append(choose, account.authMode === 'antigravity' ? button('Reconnect', () => connectFleetAccount(owner.name, account.id)) : button('Edit account', () => openModelModal(owner)), button('Remove', () => removeFleetAccount(account, owner.name)));
+            row.append(identity, quota, selection, rowActions);
+            tbody.append(row);
+        }
+        table.append(tbody);
+        wrap.append(table);
+        container.append(wrap);
+    }
     async function renderCustomModelsList() {
         const target = document.getElementById('agy-custom-models-content');
         if (!target)
@@ -567,6 +750,8 @@ window.addEventListener('DOMContentLoaded', () => {
             if (version !== renderVersion || !target.isConnected)
                 return;
             modelList = models;
+            renderGoogleFleet();
+            void refreshFleetQuotas();
             target.replaceChildren();
             const groups = new Map();
             for (const model of models) {
@@ -686,6 +871,27 @@ window.addEventListener('DOMContentLoaded', () => {
             updateWorkersHint();
             const apiKey = field(body, 'API key', 'agy-api-key', existing?.apiKey === 'none' ? '' : existing?.apiKey || '', 'password');
             apiKey.placeholder = preset().keyRequired ? 'Enter provider API key' : 'Optional for local servers';
+            const opencodeAuth = selectField(body, 'OpenCode authentication', 'agy-opencode-auth', [['auth', 'API key'], ['noAuth', 'Keyless request']], existing?.apiKey && existing.apiKey !== 'none' ? 'auth' : 'noAuth');
+            const opencodeHint = element('p', 'agy-muted', 'OpenCode may restrict keyless free models to its own app. If the service rejects this client, add an API key or choose another model/provider.');
+            body.append(opencodeHint);
+            const isOpencode = () => ['opencode', 'zen'].includes(provider.value) || (() => {
+                try {
+                    const url = new URL(apiUrl.value);
+                    return url.origin === 'https://opencode.ai' && !/\/(?:zen|inference)\/go\//.test(url.pathname);
+                }
+                catch {
+                    return false;
+                }
+            })();
+            const keylessOpencode = () => isOpencode() && opencodeAuth.value === 'noAuth';
+            const updateOpencodeAuth = () => {
+                opencodeAuth.closest('label').hidden = !isOpencode();
+                opencodeHint.hidden = !isOpencode();
+                apiKey.closest('label').hidden = provider.value === 'google-cloudcode' || keylessOpencode();
+            };
+            opencodeAuth.addEventListener('change', updateOpencodeAuth);
+            apiUrl.addEventListener('input', updateOpencodeAuth);
+            updateOpencodeAuth();
             const apiFormat = selectField(body, 'API format', 'agy-api-format', [
                 ['openai', 'OpenAI compatible'],
                 ['anthropic', 'Anthropic Messages'],
@@ -715,12 +921,14 @@ window.addEventListener('DOMContentLoaded', () => {
             ], initialPool?.strategy || 'least-loaded');
             const poolConcurrency = field(poolGrid, 'Maximum requests per account', 'agy-google-pool-concurrency', String(initialPool?.maxConcurrency || 2), 'number');
             const poolCooldown = field(poolGrid, 'Account cooldown (milliseconds)', 'agy-google-pool-cooldown', String(initialPool?.cooldownMs || 60000), 'number');
+            const nativeFailover = selectField(poolGrid, 'Native Google request fallback', 'agy-google-native-failover', [['false', 'Off'], ['true', 'Use this pool for matching native models']], String(initialPool?.nativeFailoverEnabled === true));
             googleConfig.append(poolGrid);
+            googleConfig.append(element('p', 'agy-muted', 'Optional fallback uses this saved Google account pool only when a native request for the exact provider model fails. It does not change your signed-in IDE account.'));
             const readAccounts = createGoogleAccountPanel(googleConfig, Array.isArray(existing?.googleAccounts) ? existing.googleAccounts : [], existing?.name);
             const updateGoogleVisibility = () => {
                 const isGoogle = provider.value === 'google-cloudcode';
                 googleConfig.hidden = !isGoogle;
-                apiKey.closest('label').hidden = isGoogle;
+                updateOpencodeAuth();
                 apiFormat.closest('label').hidden = isGoogle;
             };
             updateGoogleVisibility();
@@ -812,7 +1020,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 return {
                     provider: provider.value,
                     apiUrl: endpoint,
-                    apiKey: apiKey.value.trim() || 'none',
+                    apiKey: keylessOpencode() ? 'none' : apiKey.value.trim() || 'none',
                     apiFormat: apiFormat.value,
                     name: existing?.name,
                     allowUnauthorized: tls.value === 'true',
@@ -824,7 +1032,10 @@ window.addEventListener('DOMContentLoaded', () => {
                             googleAccounts: readAccounts(),
                             googleProject: googleProject.value.trim(),
                             googlePool: {
+                                ...initialPool,
+                                preferredAccountId: readAccounts().some((account) => account.id === initialPool?.preferredAccountId) ? initialPool?.preferredAccountId : undefined,
                                 strategy: poolStrategy.value,
+                                nativeFailoverEnabled: nativeFailover.value === 'true',
                                 maxConcurrency: readNumber(poolConcurrency, 'Account concurrency', 1),
                                 cooldownMs: readNumber(poolCooldown, 'Account cooldown', 1),
                             },
@@ -835,7 +1046,7 @@ window.addEventListener('DOMContentLoaded', () => {
             function modelConfig(id, title, localName) {
                 if (!id.trim() || /\s/.test(id.trim()))
                     throw new Error('Enter a model ID without spaces.');
-                if (preset().keyRequired && !apiKey.value.trim() && !workersConnection())
+                if (preset().keyRequired && !keylessOpencode() && !apiKey.value.trim() && !workersConnection())
                     throw new Error('Enter an API key for this provider.');
                 if (provider.value === 'google-cloudcode' && !readAccounts().some((account) => account.enabled !== false))
                     throw new Error('Add and enable at least one Google account.');
@@ -856,7 +1067,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     name: localName || name.value.trim() || uniqueName(`models/${provider.value}/${id}`),
                     provider: provider.value,
                     apiUrl: apiUrl.value.trim(),
-                    apiKey: apiKey.value.trim() || 'none',
+                    apiKey: keylessOpencode() ? 'none' : apiKey.value.trim() || 'none',
                     externalModelName: id.trim(),
                     displayName: title || id.trim(),
                     description: description.value.trim(),
@@ -866,7 +1077,10 @@ window.addEventListener('DOMContentLoaded', () => {
                     googleProject: provider.value === 'google-cloudcode' ? googleProject.value.trim() || undefined : undefined,
                     googlePool: provider.value === 'google-cloudcode'
                         ? {
+                            ...initialPool,
+                            preferredAccountId: readAccounts().some((account) => account.id === initialPool?.preferredAccountId) ? initialPool?.preferredAccountId : undefined,
                             strategy: poolStrategy.value,
+                            nativeFailoverEnabled: nativeFailover.value === 'true',
                             maxConcurrency: readNumber(poolConcurrency, 'Account concurrency', 1),
                             cooldownMs: readNumber(poolCooldown, 'Account cooldown', 1),
                         }
@@ -1260,17 +1474,132 @@ window.addEventListener('DOMContentLoaded', () => {
         });
         const content = element('div');
         content.id = 'agy-custom-models-content';
+        const fleet = element('div', 'agy-fleet');
+        fleet.id = 'agy-google-account-pool-section';
+        fleet.setAttribute('aria-label', 'Google account fleet and quotas');
+        fleet.hidden = true;
         const status = statusNode();
         status.id = 'agy-main-status';
         section.prepend(header, element('p', 'agy-muted', 'Provider connections, local models and remote gateways.'), actions);
-        section.append(status, content);
+        section.append(status, fleet, content);
         mount.append(section);
         void renderCustomModelsList();
+    }
+    let pickerSearch;
+    function pickerVisible(menu) {
+        if (!menu.isConnected)
+            return false;
+        for (let node = menu; node; node = node.parentElement) {
+            if (node.hidden || node.getAttribute('aria-hidden') === 'true' || node.getAttribute('data-state') === 'closed')
+                return false;
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden')
+                return false;
+        }
+        return true;
+    }
+    function checkModelPickerSearch() {
+        if (pickerSearch) {
+            if (pickerVisible(pickerSearch.menu)) {
+                pickerSearch.update();
+                return;
+            }
+            pickerSearch.cleanup();
+            pickerSearch = undefined;
+        }
+        const menus = Array.from(document.querySelectorAll('[role="menu"], [role="listbox"]'));
+        const menu = menus.find((candidate) => {
+            if (!pickerVisible(candidate) || candidate.closest('#agy-modal-overlay, #agy-custom-models-section') ||
+                candidate.parentElement?.closest('[role="menu"], [role="listbox"]') ||
+                candidate.matches('[data-radix-menu-sub-content], [data-radix-dropdown-menu-sub-content]'))
+                return false;
+            const trigger = document.getElementById(candidate.getAttribute('aria-labelledby') || '');
+            if (trigger?.closest('[role="menuitem"], [role="menuitemradio"]'))
+                return false;
+            const leaves = Array.from(candidate.querySelectorAll('*')).filter((node) => !node.children.length);
+            const labels = leaves.map((node) => node.textContent?.trim() || '').filter(Boolean);
+            return labels.slice(0, 2).includes('Model') && labels.some((label) => /^View\s+Usage$/i.test(label));
+        });
+        if (!menu)
+            return;
+        installStyles();
+        const box = element('div', 'agy-model-search-box');
+        const input = element('input', 'agy-model-search-input');
+        input.type = 'search';
+        input.placeholder = 'Search models…';
+        input.setAttribute('aria-label', 'Search models');
+        const empty = element('div', 'agy-model-no-results', 'No matching models');
+        empty.hidden = true;
+        box.append(input);
+        const header = Array.from(menu.querySelectorAll('*')).find((node) => !node.children.length && node.textContent?.trim() === 'Model');
+        (header || menu).insertAdjacentElement(header ? 'afterend' : 'afterbegin', box);
+        box.after(empty);
+        const displays = new Map();
+        const items = () => Array.from(menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], button'))
+            .filter((node) => !node.parentElement?.closest('[role="menuitem"], [role="menuitemradio"], [role="option"]') &&
+            !node.closest('.agy-model-search-box') && !/^View\s+Usage/i.test(node.textContent?.trim() || ''));
+        const restore = (node) => {
+            const old = displays.get(node);
+            if (!old)
+                return;
+            if (old.value)
+                node.style.setProperty('display', old.value, old.priority);
+            else
+                node.style.removeProperty('display');
+            displays.delete(node);
+        };
+        const update = () => {
+            const query = input.value.trim().toLowerCase();
+            let matches = 0;
+            for (const node of items()) {
+                const matched = !query || (node.textContent || '').toLowerCase().includes(query);
+                if (matched) {
+                    if (displays.has(node))
+                        restore(node);
+                    if (pickerVisible(node))
+                        matches++;
+                }
+                else if (!displays.has(node)) {
+                    displays.set(node, { value: node.style.getPropertyValue('display'), priority: node.style.getPropertyPriority('display') });
+                    node.style.setProperty('display', 'none', 'important');
+                }
+            }
+            const hidden = !query || matches > 0;
+            if (empty.hidden !== hidden)
+                empty.hidden = hidden;
+        };
+        for (const event of ['pointerdown', 'mousedown', 'click'])
+            box.addEventListener(event, (e) => e.stopPropagation());
+        input.addEventListener('input', update);
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !input.value)
+                return;
+            event.stopPropagation();
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                input.value = '';
+                update();
+            }
+            else if (event.key === 'Enter' || event.key === 'ArrowDown') {
+                event.preventDefault();
+                const first = items().find((node) => pickerVisible(node) && node.getAttribute('aria-disabled') !== 'true' && !node.disabled);
+                if (event.key === 'Enter')
+                    first?.click();
+                else
+                    first?.focus();
+            }
+        });
+        pickerSearch = { menu, update, cleanup: () => { for (const node of displays.keys())
+                restore(node); box.remove(); empty.remove(); } };
+        setTimeout(() => { if (box.isConnected && pickerVisible(menu))
+            input.focus(); }, 0);
     }
     function setupInjectionObserver() {
         injectCustomModelsSection();
         if (!document.body)
             return;
+        checkModelPickerSearch();
+        fleetTimer = setInterval(() => { void refreshFleetQuotas(); }, 30000);
         let pending;
         const observer = new MutationObserver(() => {
             if (pending)
@@ -1278,6 +1607,7 @@ window.addEventListener('DOMContentLoaded', () => {
             pending = setTimeout(() => {
                 pending = undefined;
                 injectCustomModelsSection();
+                checkModelPickerSearch();
             }, 150);
         });
         observer.observe(document.body, {
@@ -1285,12 +1615,14 @@ window.addEventListener('DOMContentLoaded', () => {
             subtree: true,
             characterData: true,
             attributes: true,
-            attributeFilter: ['hidden', 'aria-hidden', 'class', 'style'],
+            attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'data-state'],
         });
         window.addEventListener('pagehide', () => {
             observer.disconnect();
             if (pending)
                 clearTimeout(pending);
+            if (fleetTimer)
+                clearInterval(fleetTimer);
         }, { once: true });
     }
     // --- Network Interceptor for Model Injection --------------------------

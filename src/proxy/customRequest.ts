@@ -3,7 +3,7 @@ import * as https from 'https';
 import { createHash, randomUUID } from 'crypto';
 import { StringDecoder } from 'string_decoder';
 import type { CustomModel } from '../proxy';
-import { resolveApiFormat } from '../providers';
+import { describeOpencodeAccessError, isOpencodeEndpoint, resolveApiFormat } from '../providers';
 import {
   acquireGoogleAccount,
   googleAccountEndpoint,
@@ -27,6 +27,7 @@ import { activeStreamContexts, modelReasoningContent, modelToolCallIds, stateTim
 import { collectToolSchemas } from './translators/utils';
 import { subagentRouting, SubagentRoutingError } from './subagentRouting';
 import { resolveConfiguredSubagentModel } from './subagentModels';
+import { isGoogleQuotaFailure } from './googlePoolFailover';
 
 const circuits = new CircuitBreaker();
 const controllers = new Set<AbortController>();
@@ -277,6 +278,7 @@ export async function runCustomModelRequest(
       let modelFailed = false;
       const retries = kind === 'generation-test' ? 0 : Math.min(5, Math.max(0, model.maxRetries ?? 3));
       const cloudCode = model.provider === 'google-cloudcode';
+      const opencode = !cloudCode && isOpencodeEndpoint(model.apiUrl, model.provider);
       const accountCount =
         cloudCode && kind !== 'generation-test'
           ? (model.googleAccounts || []).filter((account) => account.enabled !== false).length
@@ -341,7 +343,7 @@ export async function runCustomModelRequest(
                   );
             url = new URL(target);
             if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Unsupported endpoint protocol');
-            headers = registry.getProviderHeaders(model.provider, cloudCode ? '' : model.apiKey, format);
+            headers = registry.getProviderHeaders(model.provider, cloudCode ? '' : model.apiKey, format, model.apiUrl);
             if (accountLease) {
               url = new URL(googleAccountEndpoint(accountLease.account, model.apiUrl));
               if (accountLease.account.authMode === 'antigravity' && !accountLease.account.project)
@@ -353,9 +355,13 @@ export async function runCustomModelRequest(
               const project = accountLease.account.project || model.googleProject;
               payload = { model: externalName, ...(project ? { project } : {}), request: payload };
             }
-            if (['opencode', 'zen', 'opencode-go'].includes(model.provider)) {
+            if (opencode) {
               const identity = originalBody.sessionId || originalBody.conversationId;
-              headers['x-opencode-session'] = typeof identity === 'string' ? identity : requestId;
+              // Preserve conversation affinity without putting arbitrary Unicode or control characters in a header.
+              headers['x-opencode-session'] =
+                typeof identity === 'string' && identity.trim()
+                  ? createHash('sha256').update(identity).digest('hex')
+                  : requestId;
             }
             if (model.gateway) {
               const identity = originalBody.conversationId || originalBody.sessionId;
@@ -399,18 +405,31 @@ export async function runCustomModelRequest(
           const status = upstream.statusCode || 502;
           if (status < 200 || status >= 300) {
             const errorBody =
-              status === 400 || status === 422 || (cloudCode && status === 429) ? await boundedErrorBody(upstream) : '';
+              status === 400 ||
+              status === 422 ||
+              (cloudCode && [403, 429].includes(status)) ||
+              (opencode && [401, 403].includes(status))
+                ? await boundedErrorBody(upstream)
+                : '';
             const decision =
-              cloudCode && status === 429
+              cloudCode && isGoogleQuotaFailure(status, errorBody)
                 ? classifyGoogleRateLimit(errorBody, upstream.headers['retry-after'])
                 : undefined;
             const retryAfter = decision?.retryAfterMs ?? parseRetryAfter(upstream.headers['retry-after']);
             const hint = status === 400 || status === 422 ? toolSchemaErrorHint(errorBody) : '';
             upstream.destroy();
             throw new UpstreamError(
-              `${cloudCode ? describeGoogleAccessError(status).message : `Upstream returned HTTP ${status}.`}${hint}`,
+              `${
+                cloudCode
+                  ? decision && status === 403
+                    ? 'Google Cloud Code reported a rate or quota limit (HTTP 403). Respect the provider retry/reset delay; signing in again does not increase quota.'
+                    : describeGoogleAccessError(status).message
+                  : opencode && [401, 403].includes(status)
+                    ? describeOpencodeAccessError(status, errorBody)
+                    : `Upstream returned HTTP ${status}.`
+              }${hint}`,
               status,
-              status === 408 || status === 429 || status >= 500,
+              !!decision || status === 408 || status === 429 || status >= 500,
               retryAfter,
               status !== 400 && status !== 422,
               decision,

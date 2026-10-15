@@ -11,7 +11,7 @@ import {
   writeJsonAtomic,
   redactModel,
 } from './modelStore';
-import { PROVIDERS, getProvider, resolveApiFormat, workersAiAccountPath } from './providers';
+import { PROVIDERS, getProvider, resolveApiFormat, workersAiAccountPath, isOpencodeEndpoint, OPENCODE_USER_AGENT } from './providers';
 import { loginGoogleAccount, GoogleLoginOptions } from './googleOAuth';
 import { prepareGoogleAccount } from './googleOnboarding';
 import { runGenerationProbe } from './generationProbe';
@@ -145,6 +145,12 @@ export function modelListUrl(apiUrl: string, format: string, provider?: string):
     url.searchParams.set('task', 'Text Generation');
     url.searchParams.set('per_page', '100');
     url.searchParams.set('page', '1');
+    return url.toString();
+  }
+  if (isOpencodeEndpoint(apiUrl, provider)) {
+    const legacy = /^\/zen(?:\/|$)/.test(url.pathname);
+    const go = /^\/(?:zen|inference)\/go(?:\/|$)/.test(url.pathname) || provider === 'opencode-go';
+    url.pathname = `/${legacy ? 'zen' : 'inference'}${go ? '/go' : ''}/v1/models`;
     return url.toString();
   }
   let pathname = url.pathname.replace(/\/+$/, '');
@@ -351,13 +357,17 @@ export function createModelManager(
     persistGoogleAccount(modelName, account, previous);
   });
   function saveModel(model: ModelEntry) {
+    const previous = store.read().find((saved) => saved.name === (model.originalName || model.name));
     store.save(model);
-    if (Array.isArray(model.googleAccounts))
-      for (const account of model.googleAccounts) {
-        // A catalog selection can save several models with the same masked account.
-        // Keep its pending credentials until their existing expiry; saving must not renew it.
-        resetGoogleAccountState(account.id);
-      }
+    const current = store.read().find((saved) => saved.name === model.name);
+    for (const account of Array.isArray(current?.googleAccounts) ? current.googleAccounts as GoogleAccount[] : []) {
+      const old = (Array.isArray(previous?.googleAccounts) ? previous.googleAccounts as GoogleAccount[] : []).find((value) => value.id === account.id);
+      if (!old) continue;
+      const secretChanged = (['accessToken', 'refreshToken', 'clientSecret'] as const).some((field) =>
+        (current?.encryptedGoogleAccounts ? decodeSecret(account[field], codec) : account[field] || '') !==
+        (previous?.encryptedGoogleAccounts ? decodeSecret(old[field], codec) : old[field] || ''));
+      if (secretChanged || (['clientId', 'project', 'authMode', 'cloudCodeEndpoint'] as const).some((field) => old[field] !== account[field])) resetGoogleAccountState(account.id);
+    }
     return { success: true };
   }
   function resolveGoogleAccount(input: { modelName?: string; accountId?: string; account?: GoogleAccount }) {
@@ -395,6 +405,17 @@ export function createModelManager(
     pendingAccount(account.id);
     if (!pending.has(account.id) && pending.size >= 20) pending.delete(pending.keys().next().value!);
     pending.set(account.id, { account, expiresAt: dependencies.now() + 10 * 60 * 1000 });
+  }
+  function googleModels() {
+    return store.list().filter((model) => model.provider === 'google-cloudcode');
+  }
+  function updateGoogleModels(models: ModelEntry[], ids: string[]) {
+    if (!models.length) throw new Error('No saved Google model contains this account. Reload the account list.');
+    // ModelStore validates every entry before one atomic write; masked unrelated
+    // credentials are preserved and partial updates cannot split a shared pool.
+    store.import(models);
+    for (const id of new Set(ids)) resetGoogleAccountState(id);
+    return { success: true, count: models.length };
   }
   const gatewayFile = path.join(directory, 'gateway_connection.json');
   function gatewayRaw(): GatewayConnection {
@@ -490,7 +511,10 @@ export function createModelManager(
     )
       throw new Error('Enter a Cloudflare Workers AI API token or authentication headers');
     const headers: Record<string, string> = {};
-    if (model.provider === 'fireworks') {
+    if (isOpencodeEndpoint(model.apiUrl, model.provider)) {
+      if (model.apiKey && model.apiKey !== 'none') headers.Authorization = `Bearer ${model.apiKey}`;
+      headers['User-Agent'] = OPENCODE_USER_AGENT;
+    } else if (model.provider === 'fireworks') {
       if (model.apiKey) headers.Authorization = `Bearer ${model.apiKey}`;
     } else if (format === 'anthropic') {
       headers['anthropic-version'] = '2023-06-01';
@@ -654,6 +678,54 @@ export function createModelManager(
     },
     googlePoolStatus() {
       return { success: true, accounts: getGooglePoolStatus() };
+    },
+    googleLinkAccount(input: { modelName: string; accountId: string; replaceAccountId?: string }) {
+      const account = pendingAccount(input.accountId);
+      if (!account) throw new Error('This login has expired. Sign in again.');
+      const changed: ModelEntry[] = [];
+      const resetIds = [account.id];
+      for (const model of googleModels().filter((model) => model.name === input.modelName)) {
+        const accounts = Array.isArray(model.googleAccounts) ? model.googleAccounts as GoogleAccount[] : [];
+        const index = accounts.findIndex((existing) => input.replaceAccountId
+          ? existing.id === input.replaceAccountId
+          : existing.id === account.id || (!!account.email && existing.email?.toLowerCase() === account.email.toLowerCase()));
+        if (input.replaceAccountId && index < 0) continue;
+        if (index >= 0) {
+          const previous = accounts[index];
+          if (previous.email && account.email && previous.email.toLowerCase() !== account.email.toLowerCase())
+            throw new Error('The signed-in email does not match this account. Add it as a separate account instead.');
+          // The renderer receives masked secrets. Resolve the fresh credentials
+          // using the pending login ID before preserving the saved account ID.
+          accounts[index] = { ...account, refreshToken: account.refreshToken || '', clientSecret: account.clientSecret || '', id: previous.id, label: previous.label || account.label, enabled: previous.enabled };
+          resetIds.push(previous.id);
+        } else accounts.push({ ...account, enabled: true });
+        changed.push({ ...model, googleAccounts: accounts });
+      }
+      return updateGoogleModels(changed, resetIds);
+    },
+    googleSelectAccount(input: { modelName: string; accountId: string }) {
+      const changed = googleModels().filter((model) => model.name === input.modelName && Array.isArray(model.googleAccounts) &&
+        (model.googleAccounts as GoogleAccount[]).some((account) => account.id === input.accountId && account.enabled !== false));
+      for (const model of changed) model.googlePool = { ...(model.googlePool as GooglePoolOptions || {}), preferredAccountId: input.accountId };
+      return updateGoogleModels(changed, []);
+    },
+    googleRemoveAccount(input: { modelName: string; accountId: string }) {
+      const changed: ModelEntry[] = [];
+      for (const model of googleModels()) {
+        if (model.name !== input.modelName) continue;
+        if (!Array.isArray(model.googleAccounts) || !(model.googleAccounts as GoogleAccount[]).some((account) => account.id === input.accountId)) continue;
+        const accounts = (model.googleAccounts as GoogleAccount[]).filter((account) => account.id !== input.accountId);
+        const pool = { ...(model.googlePool as GooglePoolOptions || {}) };
+        if (pool.preferredAccountId === input.accountId) delete pool.preferredAccountId;
+        changed.push({ ...model, googleAccounts: accounts, googlePool: pool,
+          ...(!accounts.some((account) => account.enabled !== false) ? { enabled: false } : {}) });
+      }
+      const result = updateGoogleModels(changed, []);
+      if (!googleModels().some((model) => Array.isArray(model.googleAccounts) && (model.googleAccounts as GoogleAccount[]).some((account) => account.id === input.accountId))) {
+        resetGoogleAccountState(input.accountId);
+        pending.delete(input.accountId);
+      }
+      return result;
     },
     async googlePrepareAccount(input: {
       modelName?: string;

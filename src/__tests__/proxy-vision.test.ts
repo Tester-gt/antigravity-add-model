@@ -1,3 +1,4 @@
+import * as googlePoolFailover from '../proxy/googlePoolFailover';
 import * as loopbackSecurity from '../proxy/loopbackSecurity';
 import * as subagentRoutingModule from '../proxy/subagentRouting';
 import * as subagentModels from '../proxy/subagentModels';
@@ -77,6 +78,7 @@ async function fixture(models: CustomModel[]) {
     './proxy/modelCatalog': modelCatalog,
     './proxy/subagentRouting': subagentRoutingModule,
     './proxy/subagentModels': subagentModels,
+    './proxy/googlePoolFailover': googlePoolFailover,
     './proxy/nativeSubagentResponse': nativeSubagentResponse,
     './proxy/cloudCodeRouting': {},
     './modelIdentity': modelIdentity,

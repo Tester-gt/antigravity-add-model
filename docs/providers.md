@@ -29,6 +29,27 @@ the recognized IDE 2.5.5 build. See the [verification details](configuration.md#
 Two-account rate-limit switching is covered by local fixtures; live verification
 used one account.
 
+## OpenCode and keyless requests
+
+The **OpenCode** preset uses the current Chat Completions endpoint
+`https://opencode.ai/inference/openai/v1/chat/completions`. Discovery uses
+`https://opencode.ai/inference/v1/models`. Choose **Keyless request** to omit the
+Authorization header, or supply an API key for an authorized route. Existing
+saved endpoints and the legacy Zen preset remain available; Go requires a key.
+Use the API family supported by the selected model.
+
+The [official inference guide](https://opencode.ai/v2/docs/console/api/inference/)
+says free chat models support keyless requests. However, a live check on
+**2026-10-15** returned HTTP 403 `FreeTierError` for `big-pickle`, restricting its
+free tier to OpenCode itself. Model listing alone does not establish generation
+access. The addon reports this restriction and asks for an authorized API route
+or another provider; it does not impersonate the OpenCode CLI, add unavailable
+tools, or treat an incomplete response as success.
+
+Requests keep the client's actual tools and streaming mode. A model on another
+provider whose name happens to end in `-free` receives no OpenCode-specific
+changes. Providers control model availability, pricing and eligibility.
+
 ## Browse OpenRouter models
 
 1. Select **OpenRouter** and enter your OpenRouter API key.

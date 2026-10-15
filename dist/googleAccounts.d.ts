@@ -1,10 +1,12 @@
 import type { GoogleCooldownReason } from './googlePoolPolicy';
 import { type GoogleAccessErrorCategory } from './googleAccessErrors';
+import { fetchGoogleUserInfo } from './googleOAuth';
 /** A consistent identifier for this application across Cloud Code account and generation requests. */
 export declare const GOOGLE_CLOUD_CODE_USER_AGENT = "antigravity-add-model";
 export interface GoogleAccount {
     id: string;
     label?: string;
+    email?: string;
     refreshToken?: string;
     accessToken?: string;
     expiresAt?: number;
@@ -20,16 +22,32 @@ export interface GooglePoolOptions {
     strategy?: 'round-robin' | 'least-loaded' | 'quota' | 'adaptive';
     maxConcurrency?: number;
     cooldownMs?: number;
+    /** An eligible preferred account wins over session affinity and balancing strategy. */
+    preferredAccountId?: string;
+    /** Explicitly permit this pool to rescue matching native Cloud Code generations. */
+    nativeFailoverEnabled?: boolean;
+}
+export interface GoogleQuotaBucket {
+    id: string;
+    displayName?: string;
+    groupName?: string;
+    remainingFraction?: number;
+    resetTime?: string;
+}
+export interface GoogleQuotaGroup {
+    name: string;
+    displayName?: string;
+    buckets: GoogleQuotaBucket[];
 }
 export interface GoogleQuotaSnapshot {
     accountId: string;
     checkedAt: number;
     remainingFraction?: number;
-    buckets: {
-        id: string;
-        remainingFraction?: number;
-        resetTime?: string;
-    }[];
+    planTier?: string;
+    email?: string;
+    name?: string;
+    buckets: GoogleQuotaBucket[];
+    groups?: GoogleQuotaGroup[];
 }
 export interface GoogleAccountLease {
     account: GoogleAccount;
@@ -53,13 +71,18 @@ export declare function googleAccountEndpoint(account: GoogleAccount, configured
 /** Refresh requests are coalesced and cached. Endpoint override is restricted to localhost fixtures. */
 export declare function refreshGoogleAccount(account: GoogleAccount, tokenEndpointOverride?: string): Promise<GoogleAccount>;
 /** Explicit quota refresh; never infers subscription eligibility or fabricates an available quota. */
-export declare function fetchGoogleQuota(account: GoogleAccount, baseURL?: string): Promise<GoogleQuotaSnapshot>;
+export declare function fetchGoogleQuota(account: GoogleAccount, baseURL?: string, options?: {
+    includeIdentity?: boolean;
+    signal?: AbortSignal;
+    fetchUserInfo?: typeof fetchGoogleUserInfo;
+}): Promise<GoogleQuotaSnapshot>;
 /** Discover only the models returned for this authenticated account/project. */
 export declare function fetchGoogleModels(account: GoogleAccount, baseURL?: string): Promise<{
     id: string;
     displayName: string;
 }[]>;
 export declare function acquireGoogleAccount(modelName: string, accounts: GoogleAccount[], options?: GooglePoolOptions, requestIdentity?: string, cooldownScope?: string): Promise<GoogleAccountLease>;
+export declare function recordGoogleAccountFailure(account: GoogleAccount, status: number, retryAfterMs?: number, cooldownScope?: string, reason?: GoogleCooldownReason): void;
 export declare function getGooglePoolStatus(): {
     id: string;
     label: string;

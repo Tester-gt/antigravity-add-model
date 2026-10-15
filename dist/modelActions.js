@@ -105,6 +105,9 @@ function createModelActions(manager) {
         'storage:google-test-account': manager.googleTestAccount,
         'storage:google-account-prepare': manager.googlePrepareAccount,
         'storage:google-pool-status': manager.googlePoolStatus,
+        'storage:google-link-account': manager.googleLinkAccount,
+        'storage:google-select-account': manager.googleSelectAccount,
+        'storage:google-remove-account': manager.googleRemoveAccount,
         'storage:get-diagnostics': diagnostics_1.getDiagnostics,
         'storage:clear-diagnostics': diagnostics_1.clearDiagnostics,
     };

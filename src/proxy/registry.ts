@@ -2,7 +2,7 @@
 import * as openai from './translators/openai';
 import * as anthropic from './translators/anthropic';
 import * as google from './translators/google';
-import { ApiFormat, resolveApiFormat } from '../providers';
+import { ApiFormat, isOpencodeEndpoint, OPENCODE_USER_AGENT, resolveApiFormat } from '../providers';
 import type { ToolSchemas } from './translators/utils';
 
 export interface TranslatorModule {
@@ -59,14 +59,16 @@ export function translateStreamChunk(
   return openai.mapOpenAIChunkToGemini(chunk as never, stateKey, streamKey, toolSchemas);
 }
 
-export function getProviderHeaders(provider: string, apiKey = '', apiFormat?: ApiFormat): ProviderHeaders {
+export function getProviderHeaders(provider: string, apiKey = '', apiFormat?: ApiFormat, apiUrl = ''): ProviderHeaders {
   const headers: ProviderHeaders = { 'Content-Type': 'application/json' };
   const format = resolveApiFormat(provider, apiFormat);
+  const opencode = isOpencodeEndpoint(apiUrl, provider);
   if (format === 'anthropic') headers['anthropic-version'] = '2023-06-01';
   if (apiKey && apiKey !== 'none') {
     if (/^(enc:|fallback:|local-gcm:|DECRYPTION_FAILED)/.test(apiKey))
       throw new Error('API key could not be decrypted; save the key again.');
-    if (format === 'google') headers['x-goog-api-key'] = apiKey;
+    if (opencode) headers.Authorization = `Bearer ${apiKey}`;
+    else if (format === 'google') headers['x-goog-api-key'] = apiKey;
     else if (format === 'anthropic') headers['x-api-key'] = apiKey;
     else headers.Authorization = `Bearer ${apiKey}`;
   }
@@ -74,7 +76,7 @@ export function getProviderHeaders(provider: string, apiKey = '', apiFormat?: Ap
     headers['HTTP-Referer'] = 'https://antigravity.google';
     headers['X-Title'] = 'Antigravity';
   }
-  if (['opencode', 'zen', 'opencode-go'].includes(provider)) headers['User-Agent'] = 'opencode';
+  if (opencode) headers['User-Agent'] = OPENCODE_USER_AGENT;
   return headers;
 }
 

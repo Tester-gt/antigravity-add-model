@@ -219,7 +219,7 @@ function validateCustomModel(model) {
             if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !entry.id.trim() || ids.has(entry.id))
                 return { valid: false, error: 'Each Google account needs a unique id' };
             ids.add(entry.id);
-            for (const field of ['label', 'refreshToken', 'accessToken', 'clientId', 'clientSecret', 'project']) {
+            for (const field of ['label', 'email', 'refreshToken', 'accessToken', 'clientId', 'clientSecret', 'project']) {
                 if (entry[field] !== undefined && typeof entry[field] !== 'string')
                     return { valid: false, error: `Google account ${field} must be a string` };
             }
@@ -237,6 +237,10 @@ function validateCustomModel(model) {
         if (!m.googlePool || typeof m.googlePool !== 'object' || Array.isArray(m.googlePool))
             return { valid: false, error: 'googlePool must be an object' };
         const options = m.googlePool;
+        if (options.nativeFailoverEnabled !== undefined && typeof options.nativeFailoverEnabled !== 'boolean')
+            return { valid: false, error: 'googlePool.nativeFailoverEnabled must be a boolean' };
+        if (options.preferredAccountId !== undefined && (typeof options.preferredAccountId !== 'string' || !options.preferredAccountId.trim() || !Array.isArray(m.googleAccounts) || !m.googleAccounts.some((account) => account.id === options.preferredAccountId)))
+            return { valid: false, error: 'googlePool.preferredAccountId must identify an account in this model' };
         if (options.strategy !== undefined && !['round-robin', 'least-loaded', 'quota', 'adaptive'].includes(options.strategy))
             return { valid: false, error: 'Invalid Google pool strategy' };
         for (const field of ['maxConcurrency', 'cooldownMs']) {

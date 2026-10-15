@@ -1,3 +1,4 @@
+import * as googlePoolFailover from '../proxy/googlePoolFailover';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -119,6 +120,7 @@ async function fixture(options: ProxyStartOptions = {}) {
     './cryptoStore': { decryptModels: (models: unknown) => models },
     './proxy/subagentRouting': subagentRouting,
     './proxy/subagentModels': subagentModels,
+    './proxy/googlePoolFailover': googlePoolFailover,
     './proxy/nativeSubagentResponse': nativeSubagentResponse,
     './proxy/cloudCodeRouting': {},
     './proxy/loopbackSecurity': loopbackSecurity,
